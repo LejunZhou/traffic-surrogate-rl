@@ -1,0 +1,32 @@
+# Phase 1 SUMO scenario configuration
+# Single-lane highway, 2000 m, one on-ramp at 500 m
+# All values match CLAUDE.md Phase 1 design decisions.
+
+network:
+  highway_length_m: 2000.0
+  ramp_position_m: 500.0      # merge point measured from upstream boundary
+  ramp_length_m: 200.0        # on-ramp edge length
+  speed_limit_mps: 33.33      # 120 km/h mainline speed limit
+  ramp_speed_limit_mps: 16.67 # 60 km/h ramp speed limit
+
+simulation:
+  duration_s: 3600            # 1 hour
+  step_length_s: 1.0          # SUMO integration step
+  dt_ctrl_s: 30               # ramp metering control interval → T_ctrl = 120
+  seed: 42
+  # Set to "sumo-gui" for interactive visualisation; "sumo" for headless.
+  sumo_binary: "sumo"
+
+demand:
+  mainline_demand_vph: 1500   # medium-constant profile
+  ramp_demand_vph: 600        # maximum ramp inflow (metering rate scales this)
+  demand_profile: "medium_constant"
+
+detectors:
+  n_detectors: 20
+  spacing_m: 100.0
+  vehicle_length_m: 5.0       # used for occupancy-to-density fallback
+
+output:
+  raw_dir: "data/raw"
+  network_dir: "data/raw/network"
