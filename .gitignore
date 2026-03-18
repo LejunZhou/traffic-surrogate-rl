@@ -1,0 +1,83 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.installed.cfg
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# ── Jupyter / IPython ─────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ── Data (never commit generated data) ────────────────────────────────────────
+data/raw/*
+data/processed/*
+data/splits/*
+# Keep the directory stubs
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/splits/.gitkeep
+
+# ── SUMO outputs ──────────────────────────────────────────────────────────────
+# Network and route files generated at runtime (not hand-authored)
+*.net.xml
+*.rou.xml
+*.sumocfg
+*.add.xml
+# SUMO detector/output logs
+*.xml
+# Exception: keep any hand-authored SUMO configs committed under configs/sumo/
+!configs/sumo/*.xml
+!configs/sumo/*.sumocfg
+
+# ── Experiment outputs ────────────────────────────────────────────────────────
+runs/
+outputs/
+results/
+checkpoints/
+logs/
+
+# ── TensorBoard ───────────────────────────────────────────────────────────────
+events.out.tfevents.*
+tb_logs/
+
+# ── Model weights (large binaries) ───────────────────────────────────────────
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.h5
+
+# ── Matplotlib / plot outputs ─────────────────────────────────────────────────
+*.png
+*.pdf
+# Exception: keep the proposal PDF
+!Proposal.pdf
+
+# ── OS / editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+*.log
+*.tmp
+*.bak
+.env
+.env.*

@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "traffic-surrogate-rl"
+version = "0.1.0"
+description = "Sample-efficient surrogate traffic model for RL-based ramp metering control"
+requires-python = ">=3.11"
+dependencies = [
+    # Deep learning
+    "torch>=2.0",
+    # Reinforcement learning
+    "stable-baselines3>=2.0",
+    "gymnasium>=0.29",
+    # SUMO Python bindings (SUMO itself must be installed separately: https://sumo.dlr.de)
+    "traci>=1.18",
+    "sumolib>=1.18",
+    # Numerics and utilities
+    "numpy",
+    "matplotlib",
+    "pyyaml",
+    "tensorboard",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "pytest-cov",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
