@@ -20,12 +20,17 @@ The ramp_start position is chosen so the ramp edge length ≈ 200 m
 Junction type at merge is "priority": mainline edges (priority=10) have
 right-of-way over the ramp (priority=5), which is standard for ramp metering.
 
-netconvert (part of the SUMO installation) must be on PATH.
+netconvert binary discovery order (see _find_netconvert):
+  1. shutil.which("netconvert")      — honours PATH as usual
+  2. $SUMO_HOME/bin/netconvert       — common when SUMO_HOME is set but bin/ not on PATH
+  3. FileNotFoundError with setup instructions if neither is found
 """
 
 from __future__ import annotations
 
 import math
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -107,10 +112,51 @@ def _write_edges(path: Path, net_cfg: dict) -> None:
     path.write_text(content)
 
 
+def _find_netconvert() -> str:
+    """Locate the netconvert binary, trying PATH then $SUMO_HOME/bin.
+
+    Returns:
+        Absolute path string to the netconvert executable.
+
+    Raises:
+        FileNotFoundError: If netconvert cannot be found via either method,
+            with clear instructions for fixing the setup.
+    """
+    # 1. Check PATH (covers Homebrew, apt, conda, and manual PATH exports).
+    binary = shutil.which("netconvert")
+    if binary is not None:
+        return binary
+
+    # 2. Try $SUMO_HOME/bin/netconvert (set by the official SUMO installer
+    #    and recommended in SUMO docs, but bin/ is not always added to PATH).
+    sumo_home = os.environ.get("SUMO_HOME", "")
+    if sumo_home:
+        candidate = Path(sumo_home) / "bin" / "netconvert"
+        if candidate.is_file():
+            return str(candidate)
+
+    # 3. Neither found — give an actionable error.
+    sumo_home_hint = (
+        f"  SUMO_HOME is set to '{sumo_home}' but {Path(sumo_home) / 'bin' / 'netconvert'} "
+        "was not found there."
+        if sumo_home
+        else "  SUMO_HOME is not set."
+    )
+    raise FileNotFoundError(
+        "netconvert not found. To fix this:\n"
+        "  • macOS (Homebrew): brew install sumo\n"
+        "  • Linux:            sudo apt install sumo  (or download from sumo.dlr.de)\n"
+        "  • All platforms:    ensure 'netconvert' is on PATH, or set SUMO_HOME to\n"
+        "                      your SUMO installation directory (e.g. /opt/sumo).\n"
+        f"{sumo_home_hint}"
+    )
+
+
 def _run_netconvert(nodes: Path, edges: Path, output: Path) -> None:
-    """Run SUMO's netconvert tool to compile the network."""
+    """Locate and run SUMO's netconvert tool to compile the network."""
+    binary = _find_netconvert()
     cmd = [
-        "netconvert",
+        binary,
         "--node-files", str(nodes),
         "--edge-files", str(edges),
         "--output-file", str(output),
@@ -120,7 +166,7 @@ def _run_netconvert(nodes: Path, edges: Path, output: Path) -> None:
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(
-            "netconvert failed. Is SUMO installed and netconvert on PATH?\n"
+            f"netconvert failed (binary: {binary}).\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
 
