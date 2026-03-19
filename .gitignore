@@ -17,6 +17,8 @@ pip-wheel-metadata/
 venv/
 env/
 ENV/
+.claude/
+.venv-traffic-rl/
 
 # ── Jupyter / IPython ─────────────────────────────────────────────────────────
 .ipynb_checkpoints/
