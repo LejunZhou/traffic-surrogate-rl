@@ -5,22 +5,40 @@
 network:
   highway_length_m: 2000.0
   ramp_position_m: 500.0      # merge point measured from upstream boundary
-  ramp_length_m: 200.0        # on-ramp edge length
+  ramp_length_m: 500.0        # on-ramp edge length (increased from 200 m to reduce
+                               # teleports: longer queue buffer before merge point)
   speed_limit_mps: 33.33      # 120 km/h mainline speed limit
-  ramp_speed_limit_mps: 16.67 # 60 km/h ramp speed limit
+  ramp_speed_limit_mps: 27.78 # 100 km/h ramp speed limit (raised from 60 km/h to reduce
+                               # merge teleports: smaller velocity differential at the
+                               # merge point reduces the gap SUMO requires from mainline
+                               # traffic before releasing a ramp vehicle onto highway_post)
 
 simulation:
   duration_s: 3600            # 1 hour
   step_length_s: 1.0          # SUMO integration step
   dt_ctrl_s: 30               # ramp metering control interval → T_ctrl = 120
+  ramp_warmup_s: 120          # seconds before ramp insertion starts; lets the initial
+                               # mainline dense wave (departSpeed=max → tight platoon
+                               # arrives at merge ≈ t=15 s) fully dissipate before the
+                               # first ramp vehicle arrives. 120 s = 4 control steps.
   seed: 42
   # Set to "sumo-gui" for interactive visualisation; "sumo" for headless.
   sumo_binary: "sumo"
 
 demand:
-  mainline_demand_vph: 1500   # medium-constant profile
+  mainline_demand_vph: 1200   # medium-constant profile (reduced from 1500 to eliminate
+                               # ramp teleports: at 1500 veh/hr deterministic IDM spacing
+                               # is 2.4 s ≈ SUMO gap-acceptance threshold → cascade block;
+                               # at 1200 veh/hr spacing is 3.0 s, reliably above threshold)
   ramp_demand_vph: 600        # maximum ramp inflow (metering rate scales this)
   demand_profile: "medium_constant"
+
+vehicle:
+  idm_tau_s: 1.5              # IDM headway time [s]; default SUMO value is 1.0 s,
+                               # which gives capacity ≈ 2970 veh/hr — well above Phase 1
+                               # demand range. 1.5 s lowers capacity to ≈ 1930 veh/hr,
+                               # so the mainline (1500 veh/hr) operates near capacity
+                               # and localised congestion can form at the merge point.
 
 detectors:
   n_detectors: 20

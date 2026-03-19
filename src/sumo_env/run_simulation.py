@@ -76,6 +76,7 @@ def run_simulation(
     dt_ctrl: int = sim_cfg["dt_ctrl_s"]               # 30 s
     dt_ctrl_steps: int = int(dt_ctrl / step_len)      # 30 sub-steps per control step
     T_ctrl: int = int(sim_cfg["duration_s"] / dt_ctrl)  # 120
+    warmup_s: float = float(sim_cfg.get("ramp_warmup_s", 0.0))
     seed: int = sim_cfg["seed"]
     sumo_binary: str = sim_cfg["sumo_binary"]
 
@@ -112,6 +113,12 @@ def run_simulation(
     veh_counter = 0          # global ramp vehicle ID counter
     frac_accumulator = 0.0   # fractional carry-forward for ramp insertion
 
+    # Insertion / teleport counters (logged in metadata)
+    total_insert_attempts = 0
+    total_insert_success = 0
+    total_insert_rejected = 0
+    total_teleports = 0
+
     try:
         traci.start(sumo_cmd)
 
@@ -125,31 +132,40 @@ def run_simulation(
             # Rate of ramp vehicle insertion this control step [veh/s]
             insert_rate = ramp_control[k] * ramp_demand_vph / 3600.0
 
-            for _ in range(dt_ctrl_steps):
-                # --- Ramp vehicle insertion (before stepping) ---
-                frac_accumulator += insert_rate * step_len
-                n_insert = int(frac_accumulator)
-                frac_accumulator -= n_insert
-                for _ in range(n_insert):
-                    try:
-                        traci.vehicle.add(
-                            vehID=f"ramp_{veh_counter}",
-                            routeID="route_ramp",
-                            typeID="passenger",
-                            depart=str(traci.simulation.getTime()),
-                            departLane="first",
-                            departPos="base",
-                            departSpeed="0",
-                        )
-                        veh_counter += 1
-                    except traci.exceptions.TraCIException:
-                        # SUMO rejected insertion (e.g. no space on ramp).
-                        # The vehicle is skipped; the fractional accumulator
-                        # does NOT refund it to avoid repeated retry loops.
-                        pass
+            for sub in range(dt_ctrl_steps):
+                # --- Ramp vehicle insertion (skipped during warmup) ---
+                # warmup_s lets the initial mainline dense wave (caused by
+                # departSpeed=max) dissipate before any ramp vehicle arrives
+                # at the merge, preventing the cascade-blockage pattern.
+                if traci.simulation.getTime() >= warmup_s:
+                    frac_accumulator += insert_rate * step_len
+                    n_insert = int(frac_accumulator)
+                    frac_accumulator -= n_insert
+                    for _ in range(n_insert):
+                        total_insert_attempts += 1
+                        try:
+                            traci.vehicle.add(
+                                vehID=f"ramp_{veh_counter}",
+                                routeID="route_ramp",
+                                typeID="passenger",
+                                depart=str(traci.simulation.getTime()),
+                                departLane="first",
+                                departPos="free",   # first collision-free gap on ramp
+                                departSpeed="0",
+                            )
+                            veh_counter += 1
+                            total_insert_success += 1
+                        except traci.exceptions.TraCIException:
+                            # SUMO rejected insertion (e.g. no space on ramp).
+                            # The vehicle is skipped; the fractional accumulator
+                            # does NOT refund it to avoid repeated retry loops.
+                            total_insert_rejected += 1
 
                 # --- Advance simulation by one step ---
                 traci.simulationStep()
+
+                # --- Count teleports this step ---
+                total_teleports += traci.simulation.getStartingTeleportNumber()
 
                 # --- Read detector values for this step ---
                 for j, det_id in enumerate(det_ids):
@@ -209,5 +225,11 @@ def run_simulation(
             "sumo_binary": sumo_binary,
             "T_ctrl": T_ctrl,
             "N_x": N_x,
+            # Insertion and teleport diagnostics
+            "insert_attempts": total_insert_attempts,
+            "insert_success": total_insert_success,
+            "insert_rejected": total_insert_rejected,
+            "teleports": total_teleports,
+            "ramp_warmup_s": warmup_s,
         },
     }

@@ -1,0 +1,56 @@
+# Diagnostic Scenario 4: Overloaded stress test
+# Near-capacity mainline, full ramp demand (run with --ramp-rate 1.0).
+#
+# Flow accounting:
+#   mainline upstream  : 1800 veh/hr  (≈ 86% of IDM capacity ≈ 2100 veh/hr)
+#   ramp contribution  :  600 veh/hr  (rate = 1.0, full demand)
+#   total downstream   : 2400 veh/hr  > capacity → over-saturated merge
+#
+# Expected behaviour:
+#   density   : heavy congestion builds near the merge (detectors 4-5, x≈500 m);
+#               queue spills back along highway_pre over time; downstream
+#               (highway_post) also elevated but below jam density
+#   speed     : near-standstill (<30 km/h) at merge; freeflow upstream before
+#               the back-of-queue wave reaches the upstream boundary
+#   flow      : reduced through the bottleneck (capacity drop); downstream flow
+#               limited to ≈ IDM capacity despite higher upstream demand
+#   teleports : likely — mainline time-gap ≈ 2.0 s is at or below SUMO's
+#               gap-acceptance threshold; this is acceptable for a stress test
+#   bottleneck: severe, clearly visible density peak at x ≈ 500 m that
+#               spreads upstream over the 3600 s horizon
+#
+# Purpose: verifies that the SUMO network, detectors, and density extraction
+# correctly capture strong congestion dynamics and a distinct merge bottleneck.
+# If this scenario shows no congestion, the network topology is misconfigured.
+
+network:
+  highway_length_m: 2000.0
+  ramp_position_m: 500.0
+  ramp_length_m: 500.0
+  speed_limit_mps: 33.33
+  ramp_speed_limit_mps: 27.78
+
+simulation:
+  duration_s: 3600
+  step_length_s: 1.0
+  dt_ctrl_s: 30
+  ramp_warmup_s: 120
+  seed: 42
+  sumo_binary: "sumo"
+
+demand:
+  mainline_demand_vph: 1800   # near-capacity — 2400 veh/hr total exceeds IDM capacity
+  ramp_demand_vph: 600        # full ramp at rate=1.0
+  demand_profile: "stress_diagnostic"
+
+vehicle:
+  idm_tau_s: 1.5
+
+detectors:
+  n_detectors: 20
+  spacing_m: 100.0
+  vehicle_length_m: 5.0
+
+output:
+  raw_dir: "data/raw"
+  network_dir: "data/raw/network"

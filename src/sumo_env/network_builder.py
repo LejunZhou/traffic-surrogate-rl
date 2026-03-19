@@ -183,15 +183,18 @@ def _write_routes(path: Path, config: dict) -> None:
     net_cfg = config["network"]
     sim_cfg = config["simulation"]
     demand_cfg = config["demand"]
+    veh_cfg = config.get("vehicle", {})
 
     spd = net_cfg["speed_limit_mps"]
     duration = sim_cfg["duration_s"]
     vph = demand_cfg["mainline_demand_vph"]
+    tau = veh_cfg.get("idm_tau_s", 1.0)   # default: SUMO built-in IDM default
 
     content = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         "<routes>\n"
         '    <!-- Deterministic IDM driver: sigma=0, speedDev=0 (Phase 1). -->\n'
+        f'    <!-- IDM headway tau={tau:.2f} s (from config vehicle.idm_tau_s). -->\n'
         '    <vType id="passenger"\n'
         '           carFollowModel="IDM"\n'
         '           accel="2.6"\n'
@@ -199,6 +202,7 @@ def _write_routes(path: Path, config: dict) -> None:
         '           sigma="0.0"\n'
         '           length="5.0"\n'
         '           minGap="2.0"\n'
+        f'           tau="{tau:.2f}"\n'
         f'           maxSpeed="{spd:.2f}"\n'
         '           speedFactor="1.0"\n'
         '           speedDev="0.0"/>\n'

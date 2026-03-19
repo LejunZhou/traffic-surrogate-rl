@@ -38,7 +38,7 @@ _SRC = _PROJECT_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from utils.config import load_config
+from utils.config import load_config, merge_configs
 from sumo_env.network_builder import build_network
 from sumo_env.detectors import build_detector_file
 from sumo_env.run_simulation import run_simulation
@@ -63,15 +63,75 @@ def parse_args() -> argparse.Namespace:
         default="0000",
         help="Zero-padded index used in output filenames (default: 0000)",
     )
+    p.add_argument(
+        "--set",
+        action="append",
+        metavar="SECTION.KEY=VALUE",
+        default=[],
+        dest="overrides",
+        help=(
+            "Override a config value using dot-notation key=value pairs "
+            "(can be repeated), e.g. --set demand.mainline_demand_vph=1000 "
+            "--set simulation.seed=7"
+        ),
+    )
     return p.parse_args()
+
+
+def _parse_set_overrides(items: list[str]) -> dict:
+    """Parse --set SECTION.KEY=VALUE strings into a nested override dict.
+
+    Supports one level of nesting (SECTION.KEY).  Values are coerced to int,
+    then float, then left as str.
+
+    Args:
+        items: List of strings like ["demand.mainline_demand_vph=1200", ...].
+
+    Returns:
+        Nested dict suitable for passing to merge_configs().
+
+    Raises:
+        ValueError: If an item does not contain '='.
+    """
+    result: dict = {}
+    for item in items:
+        if "=" not in item:
+            raise ValueError(
+                f"--set override must be in KEY=VALUE format, got: {item!r}"
+            )
+        key, raw_val = item.split("=", 1)
+        parts = key.split(".")
+
+        # Coerce value: int → float → str
+        val: int | float | str
+        try:
+            val = int(raw_val)
+        except ValueError:
+            try:
+                val = float(raw_val)
+            except ValueError:
+                val = raw_val
+
+        # Build nested dict one level at a time
+        d = result
+        for part in parts[:-1]:
+            d = d.setdefault(part, {})
+        d[parts[-1]] = val
+
+    return result
 
 
 def main() -> None:
     args = parse_args()
 
-    # ── 1. Load config ────────────────────────────────────────────────────────
+    # ── 1. Load config (with optional --set overrides) ────────────────────────
     config_path = _PROJECT_ROOT / args.config
     config = load_config(str(config_path))
+
+    if args.overrides:
+        override_dict = _parse_set_overrides(args.overrides)
+        config = merge_configs(config, override_dict)
+        print(f"[run_rollout] Overrides    : {args.overrides}")
 
     sim_cfg = config["simulation"]
     out_cfg = config["output"]
@@ -79,9 +139,12 @@ def main() -> None:
     T_ctrl = int(sim_cfg["duration_s"] / sim_cfg["dt_ctrl_s"])  # 120
     ramp_control = np.full(T_ctrl, args.ramp_rate, dtype=np.float32)
 
+    warmup_s = sim_cfg.get("ramp_warmup_s", 0.0)
     print(f"[run_rollout] Config      : {config_path}")
     print(f"[run_rollout] Ramp rate   : {args.ramp_rate:.2f} (constant throughout)")
     print(f"[run_rollout] T_ctrl      : {T_ctrl} steps × {sim_cfg['dt_ctrl_s']} s")
+    print(f"[run_rollout] Ramp warmup : {warmup_s:.0f} s "
+          f"({int(warmup_s / sim_cfg['dt_ctrl_s'])} control steps with no ramp insertion)")
 
     # ── 2. Build network ──────────────────────────────────────────────────────
     network_dir = _PROJECT_ROOT / out_cfg["network_dir"]
@@ -143,11 +206,15 @@ def main() -> None:
 
     # ── 7. Summary ────────────────────────────────────────────────────────────
     d = result["density"]
+    meta = result["metadata"]
     print("\n── Summary ──────────────────────────────────────────")
     print(f"  density  : mean={d.mean():.2f}, max={d.max():.2f}  veh/km")
     print(f"  speed    : mean={result['speed'].mean():.1f}  km/h")
     print(f"  flow     : mean={result['flow'].mean():.0f}  veh/hr")
     print(f"  shape    : density{d.shape}  (N_x × T_ctrl)")
+    print(f"  insertions: {meta['insert_success']}/{meta['insert_attempts']} "
+          f"ok, {meta['insert_rejected']} rejected")
+    print(f"  teleports : {meta['teleports']}")
     print("─────────────────────────────────────────────────────")
 
 
