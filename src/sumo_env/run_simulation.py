@@ -38,7 +38,7 @@ except ImportError as exc:
         "bindings are on PYTHONPATH (e.g. export PYTHONPATH=$SUMO_HOME/tools)."
     ) from exc
 
-from sumo_env.detectors import get_detector_ids, get_x_grid
+from sumo_env.detectors import get_detector_ids, get_detector_ids_per_lane, get_x_grid
 
 
 def run_simulation(
@@ -84,6 +84,7 @@ def run_simulation(
     veh_len: float = det_cfg["vehicle_length_m"]     # for occupancy fallback
 
     det_ids = get_detector_ids(config)
+    det_ids_per_lane = get_detector_ids_per_lane(config)
     x_grid = get_x_grid(config)
     N_x = len(det_ids)
 
@@ -118,6 +119,9 @@ def run_simulation(
     total_insert_success = 0
     total_insert_rejected = 0
     total_teleports = 0
+
+    # Ramp queue tracking (vehicles on the ramp edge per sub-step)
+    ramp_queue_samples: list[int] = []
 
     try:
         traci.start(sumo_cmd)
@@ -167,17 +171,24 @@ def run_simulation(
                 # --- Count teleports this step ---
                 total_teleports += traci.simulation.getStartingTeleportNumber()
 
-                # --- Read detector values for this step ---
-                for j, det_id in enumerate(det_ids):
-                    count = traci.inductionloop.getLastStepVehicleNumber(det_id)
-                    spd_raw = traci.inductionloop.getLastStepMeanSpeed(det_id)  # m/s or -1
-                    occ = traci.inductionloop.getLastStepOccupancy(det_id)      # %
+                # --- Sample ramp queue length ---
+                ramp_queue_samples.append(
+                    traci.edge.getLastStepVehicleNumber("ramp")
+                )
 
-                    sum_count[j] += count
-                    sum_occ[j] += occ
-                    if spd_raw >= 0.0:
-                        sum_speed[j] += spd_raw
-                        speed_count[j] += 1
+                # --- Read detector values for this step ---
+                # Aggregate across lanes at each spatial position.
+                for j, lane_ids in enumerate(det_ids_per_lane):
+                    for det_id in lane_ids:
+                        count = traci.inductionloop.getLastStepVehicleNumber(det_id)
+                        spd_raw = traci.inductionloop.getLastStepMeanSpeed(det_id)  # m/s or -1
+                        occ = traci.inductionloop.getLastStepOccupancy(det_id)      # %
+
+                        sum_count[j] += count
+                        sum_occ[j] += occ
+                        if spd_raw >= 0.0:
+                            sum_speed[j] += spd_raw * count  # count-weighted for averaging
+                            speed_count[j] += count
 
             # --- Aggregate over control interval ---
             flow_vph = sum_count / (dt_ctrl_steps * step_len) * 3600.0  # veh/hr
@@ -231,5 +242,7 @@ def run_simulation(
             "insert_rejected": total_insert_rejected,
             "teleports": total_teleports,
             "ramp_warmup_s": warmup_s,
+            "ramp_queue_max": int(max(ramp_queue_samples)) if ramp_queue_samples else 0,
+            "ramp_queue_mean": float(np.mean(ramp_queue_samples)) if ramp_queue_samples else 0.0,
         },
     }

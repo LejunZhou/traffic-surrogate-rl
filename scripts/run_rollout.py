@@ -215,6 +215,8 @@ def main() -> None:
     print(f"  insertions: {meta['insert_success']}/{meta['insert_attempts']} "
           f"ok, {meta['insert_rejected']} rejected")
     print(f"  teleports : {meta['teleports']}")
+    print(f"  ramp queue: max={meta.get('ramp_queue_max', '?')}, "
+          f"mean={meta.get('ramp_queue_mean', '?'):.1f}")
     print("─────────────────────────────────────────────────────")
 
 

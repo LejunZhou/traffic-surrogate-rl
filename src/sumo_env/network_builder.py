@@ -82,11 +82,17 @@ def _write_nodes(path: Path, net_cfg: dict) -> None:
     rx = ramp_pos - ramp_len * math.cos(angle)
     ry = -ramp_len * math.sin(angle)
 
+    num_lanes = net_cfg.get("num_lanes", 1)
+    # For multi-lane mainline, use "zipper" at merge (cooperative merging)
+    # so ramp vehicles don't have to yield to all mainline lanes simultaneously.
+    # For single-lane, keep "priority" (original behavior).
+    merge_type = "zipper" if num_lanes > 1 else "priority"
+
     content = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         "<nodes>\n"
         '    <node id="upstream"   x="0.00"         y="0.00"       type="priority"/>\n'
-        f'    <node id="merge"      x="{ramp_pos:.2f}"    y="0.00"       type="priority"/>\n'
+        f'    <node id="merge"      x="{ramp_pos:.2f}"    y="0.00"       type="{merge_type}"/>\n'
         f'    <node id="downstream" x="{hw_len:.2f}"   y="0.00"       type="priority"/>\n'
         f'    <node id="ramp_start" x="{rx:.2f}"   y="{ry:.2f}" type="priority"/>\n'
         "</nodes>\n"
@@ -97,14 +103,15 @@ def _write_nodes(path: Path, net_cfg: dict) -> None:
 def _write_edges(path: Path, net_cfg: dict) -> None:
     spd_main = net_cfg["speed_limit_mps"]
     spd_ramp = net_cfg["ramp_speed_limit_mps"]
+    num_lanes = net_cfg.get("num_lanes", 1)
 
     content = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         "<edges>\n"
         f'    <edge id="highway_pre"  from="upstream"   to="merge"      '
-        f'numLanes="1" speed="{spd_main:.2f}" priority="10"/>\n'
+        f'numLanes="{num_lanes}" speed="{spd_main:.2f}" priority="10"/>\n'
         f'    <edge id="highway_post" from="merge"      to="downstream" '
-        f'numLanes="1" speed="{spd_main:.2f}" priority="10"/>\n'
+        f'numLanes="{num_lanes}" speed="{spd_main:.2f}" priority="10"/>\n'
         f'    <edge id="ramp"         from="ramp_start" to="merge"      '
         f'numLanes="1" speed="{spd_ramp:.2f}" priority="5"/>\n'
         "</edges>\n"
@@ -189,6 +196,8 @@ def _write_routes(path: Path, config: dict) -> None:
     duration = sim_cfg["duration_s"]
     vph = demand_cfg["mainline_demand_vph"]
     tau = veh_cfg.get("idm_tau_s", 1.0)   # default: SUMO built-in IDM default
+    num_lanes = net_cfg.get("num_lanes", 1)
+    depart_lane = "best" if num_lanes > 1 else "0"
 
     content = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -215,7 +224,7 @@ def _write_routes(path: Path, config: dict) -> None:
         '          route="route_main"\n'
         f'          begin="0" end="{duration}"\n'
         f'          vehsPerHour="{vph}"\n'
-        '          departLane="0"\n'
+        f'          departLane="{depart_lane}"\n'
         '          departSpeed="max"/>\n'
         "</routes>\n"
     )

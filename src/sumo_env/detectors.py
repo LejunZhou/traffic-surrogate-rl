@@ -47,6 +47,8 @@ def build_detector_file(output_path: str, config: dict) -> str:
     freq: int = sim_cfg["dt_ctrl_s"]           # 30
     ramp_pos: float = net_cfg["ramp_position_m"]  # 500.0
 
+    num_lanes: int = net_cfg.get("num_lanes", 1)
+
     n_pre = int(ramp_pos / spacing)            # 5  (on highway_pre)
     n_post = n - n_pre                         # 15 (on highway_post)
 
@@ -57,24 +59,28 @@ def build_detector_file(output_path: str, config: dict) -> str:
 
     for i in range(n_pre):
         pos = (i + 0.5) * spacing
-        lines.append(
-            f'    <inductionLoop id="det_{i:02d}" '
-            f'lane="highway_pre_0" '
-            f'pos="{pos:.1f}" '
-            f'freq="{freq}" '
-            f'file="{det_out}"/>'
-        )
+        for lane in range(num_lanes):
+            det_id = f"det_{i:02d}" if num_lanes == 1 else f"det_{i:02d}_L{lane}"
+            lines.append(
+                f'    <inductionLoop id="{det_id}" '
+                f'lane="highway_pre_{lane}" '
+                f'pos="{pos:.1f}" '
+                f'freq="{freq}" '
+                f'file="{det_out}"/>'
+            )
 
     for i in range(n_post):
         pos = (i + 0.5) * spacing
         idx = n_pre + i
-        lines.append(
-            f'    <inductionLoop id="det_{idx:02d}" '
-            f'lane="highway_post_0" '
-            f'pos="{pos:.1f}" '
-            f'freq="{freq}" '
-            f'file="{det_out}"/>'
-        )
+        for lane in range(num_lanes):
+            det_id = f"det_{idx:02d}" if num_lanes == 1 else f"det_{idx:02d}_L{lane}"
+            lines.append(
+                f'    <inductionLoop id="{det_id}" '
+                f'lane="highway_post_{lane}" '
+                f'pos="{pos:.1f}" '
+                f'freq="{freq}" '
+                f'file="{det_out}"/>'
+            )
 
     lines.append("</additional>")
     Path(output_path).write_text("\n".join(lines))
@@ -82,16 +88,40 @@ def build_detector_file(output_path: str, config: dict) -> str:
 
 
 def get_detector_ids(config: dict) -> list[str]:
-    """Return ordered detector IDs from upstream to downstream.
+    """Return ordered spatial detector IDs from upstream to downstream.
+
+    For single-lane configs, returns ["det_00", …, "det_19"].
+    For multi-lane configs, also returns ["det_00", …, "det_19"] (spatial only).
+    Use get_detector_ids_per_lane() to get per-lane IDs for aggregation.
 
     Args:
         config: Full experiment config dict.
 
     Returns:
-        List of strings ["det_00", "det_01", …, "det_19"].
+        List of N_x spatial ID strings.
     """
     n: int = config["detectors"]["n_detectors"]
     return [f"det_{i:02d}" for i in range(n)]
+
+
+def get_detector_ids_per_lane(config: dict) -> list[list[str]]:
+    """Return per-lane detector IDs grouped by spatial position.
+
+    Args:
+        config: Full experiment config dict.
+
+    Returns:
+        List of N_x lists, each containing num_lanes detector ID strings.
+        Single-lane: [["det_00"], ["det_01"], …]
+        Multi-lane:  [["det_00_L0", "det_00_L1"], ["det_01_L0", "det_01_L1"], …]
+    """
+    n: int = config["detectors"]["n_detectors"]
+    num_lanes: int = config.get("network", {}).get("num_lanes", 1)
+
+    if num_lanes == 1:
+        return [[f"det_{i:02d}"] for i in range(n)]
+
+    return [[f"det_{i:02d}_L{lane}" for lane in range(num_lanes)] for i in range(n)]
 
 
 def get_x_grid(config: dict) -> np.ndarray:

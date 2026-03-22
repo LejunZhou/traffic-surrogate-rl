@@ -1,0 +1,36 @@
+# Phase 1.1 SUMO scenario configuration
+# Two-lane mainline highway with lane-changing + zipper merge junction.
+# All parameters restored to CLAUDE.md originals after ablation confirmed
+# that workarounds are unnecessary with the zipper junction.
+
+network:
+  highway_length_m: 2000.0
+  ramp_position_m: 500.0      # merge point measured from upstream boundary
+  ramp_length_m: 200.0        # on-ramp edge length (CLAUDE.md original)
+  speed_limit_mps: 33.33      # 120 km/h mainline speed limit
+  ramp_speed_limit_mps: 16.67 # 60 km/h ramp speed limit (CLAUDE.md original)
+  num_lanes: 2                # mainline lanes (ramp stays 1 lane)
+
+simulation:
+  duration_s: 3600            # 1 hour
+  step_length_s: 1.0          # SUMO integration step
+  dt_ctrl_s: 30               # ramp metering control interval → T_ctrl = 120
+  seed: 42
+  sumo_binary: "sumo"
+
+demand:
+  mainline_demand_vph: 1500   # medium-constant profile (CLAUDE.md original)
+  ramp_demand_vph: 600        # maximum ramp inflow (metering rate scales this)
+  demand_profile: "medium_constant"
+
+vehicle:
+  idm_tau_s: 1.0              # IDM headway time (SUMO default, CLAUDE.md original)
+
+detectors:
+  n_detectors: 20
+  spacing_m: 100.0
+  vehicle_length_m: 5.0
+
+output:
+  raw_dir: "data/raw"
+  network_dir: "data/raw/network"
