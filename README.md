@@ -49,6 +49,21 @@ bash scripts/train_ppo_surrogate.sh configs/rl/ppo_surrogate.yaml
 bash scripts/eval_in_sumo.sh configs/experiments/phase1.yaml
 ```
 
+### Quick start: run a single simulation
+
+```bash
+# Set SUMO environment (macOS framework install)
+export SUMO_HOME="/Library/Frameworks/EclipseSUMO.framework/Versions/Current/EclipseSUMO"
+export PYTHONPATH="$SUMO_HOME/share/sumo/tools:$PYTHONPATH"
+export PATH="$SUMO_HOME/bin:$PATH"
+
+# Run one rollout with the Phase 1.1 config (2-lane zipper merge)
+python scripts/run_rollout.py \
+  --config configs/sumo/phase1_1.yaml \
+  --ramp-rate 0.5 \
+  --output-index test
+```
+
 ## Phase 1 scope
 
 - Single-lane highway, 2000 m, one on-ramp

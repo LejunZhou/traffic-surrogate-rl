@@ -119,6 +119,79 @@ The higher density/flow in zipper runs is expected: ramp vehicles enter the netw
 
 Status: Milestone 1 workaround parameters (ramp_warmup_s=120, idm_tau_s=1.5, mainline_demand_vph=1200, ramp_length_m=500, ramp_speed_limit_mps=27.78) remain in place. Parameter rollback ablation is a separate follow-up task.
 
+## SUMO setup on this Mac
+
+SUMO is installed at `/Library/Frameworks/EclipseSUMO.framework/Versions/Current/EclipseSUMO`.
+
+Before running SUMO-based simulations in a fresh shell, set these environment variables:
+```bash
+export SUMO_HOME="/Library/Frameworks/EclipseSUMO.framework/Versions/Current/EclipseSUMO"
+export PYTHONPATH="$SUMO_HOME/share/sumo/tools:$PYTHONPATH"
+export PATH="$SUMO_HOME/bin:$PATH"
+```
+
+If `sumo`, `netconvert`, or `duarouter` are "not found", the issue is usually environment setup, not a missing installation.
+
+## Milestone 1.1 rerun (2026-03-22)
+
+Command:
+```bash
+python scripts/run_rollout.py --config configs/sumo/phase1_1.yaml --ramp-rate 0.5 --output-index rerun_1_1
+```
+
+Results (using the current `phase1_1.yaml` configuration at the time of this rerun):
+- Teleports: 0
+- Inserts: 299/299, 0 rejected
+- Mean density: 17.36 veh/km
+- Mean flow: 1987 veh/hr
+- Ramp queue: max=2, mean=1.2
+
+These metrics differ from the earlier Milestone 1.1 table above because the config has since been updated (e.g. `mainline_demand_vph` changed from 1200 to 1500, workaround parameters removed). Zero teleports confirms the zipper merge continues to work correctly.
+
+## Milestone 2 MVP: dataset generation (2026-03-22)
+
+### Scope
+- **Constant mainline demand only**: 1000, 1500, 2000 veh/hr
+- **Ramp control families**: constant, piecewise_constant, smooth, ramp_step (equally weighted)
+- Time-varying demand (mild_peak) is deferred to Milestone 2b (requires route-generation changes)
+- Truncated/zero-padded variants are deferred to Milestone 2b (post-processing; value unclear until RL transfer is tested)
+- Surrogate target: density only (speed/flow saved for diagnostics)
+
+### Smoke-test setting
+- n_samples=12 (4 per demand level)
+- Split: train=8, val=2, test=2
+- Config: `configs/experiments/dataset_phase1.yaml` with base SUMO config `configs/sumo/phase1_1.yaml`
+- Output tensors per sample: density (20, 120), speed (20, 120), flow (20, 120), x_grid (20,), t_grid (120,), mainline_demand (120,), ramp_control (120,), plus scalar metadata (seed, mainline_demand_vph, ramp_demand_vph)
+
+### Smoke-test result
+- 0 teleports across all 12 simulations
+- All 3 demand levels covered (1000, 1500, 2000)
+- All 4 control types covered
+- density shape (20, 120) — correct
+- No NaN/Inf in any array
+- Split integrity: no overlap between train/val/test
+- Normalization stats: mean_density=16.563, std_density=5.745, demand range [1000, 2000]
+- Round-trip denormalization check: PASS
+
+### Environment setup and command
+Before running, set SUMO environment variables:
+```bash
+export SUMO_HOME="/Library/Frameworks/EclipseSUMO.framework/Versions/Current/EclipseSUMO"
+export PYTHONPATH="$SUMO_HOME/share/sumo/tools:$PYTHONPATH"
+export PATH="$SUMO_HOME/bin:$PATH"
+```
+
+From the repository root:
+```bash
+cd src && python -m sumo_env.dataset_generation \
+  --config configs/experiments/dataset_phase1.yaml
+```
+
+To override sample count for quick tests, add `--n-samples 12`.
+
+### Conclusion
+Milestone 2 MVP pipeline is implemented and smoke-tested. Full dataset generation (n=120) and DeepONet surrogate training (Milestone 3) are the next steps. Time-varying demand profiles and truncation/zero-padding variants are deferred follow-up work (Milestone 2b).
+
 ## Coding rules
 - Python 3.11
 - Use type hints

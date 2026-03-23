@@ -1,0 +1,41 @@
+# Milestone 2 MVP: dataset generation config
+# Constant demand levels only; time-varying demand deferred to Milestone 2b.
+#
+# Usage:
+#   python scripts/generate_dataset.py --config configs/experiments/dataset_phase1.yaml
+
+# Base SUMO scenario config (2-lane zipper merge)
+base_sumo_config: "configs/sumo/phase1_1.yaml"
+
+dataset:
+  n_samples: 120                # total base trajectories (40 per demand level)
+  random_seed: 42
+
+  # Constant demand levels (veh/hr) — one per simulation
+  demand_levels:
+    - 1000                      # low
+    - 1500                      # medium
+    - 2000                      # high
+
+  # Ramp control sampling family (equally weighted)
+  # Type A: constant — single random level for all 120 steps
+  # Type B: piecewise_constant — 2–6 random segments
+  # Type C: smooth — 4–8 knots, linearly interpolated
+  # Type D: ramp_step — monotone or up-then-down / down-then-up patterns
+  ramp_control_types:
+    - "constant"
+    - "piecewise_constant"
+    - "smooth"
+    - "ramp_step"
+
+splits:
+  train_frac: 0.7
+  val_frac: 0.15
+  test_frac: 0.15
+
+output:
+  raw_dir: "data/raw"
+  splits_dir: "data/splits"
+  network_dir: "data/raw/network"
+  save_heatmaps: true           # save density heatmap PNGs for QA
+  heatmap_every_n: 10           # save a heatmap every N samples (not all)
