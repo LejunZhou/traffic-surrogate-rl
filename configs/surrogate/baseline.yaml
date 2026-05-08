@@ -1,0 +1,41 @@
+# Baseline DeepONet surrogate.
+# Learns ramp_control(t) -> density(x, t) under constant mainline inflow.
+
+data:
+  raw_dir: "data/raw"
+  split_index_file: "data/splits/split_index.json"
+  metadata_file: "data/splits/metadata.json"
+  constant_mainline_demand_vph: 1500
+  highway_length_m: 2000.0
+  duration_s: 3600.0
+
+  # Random query points per rollout during training.
+  # Validation/test use the full 20 x 120 grid.
+  n_query_points: 512
+
+model:
+  branch_input_dim: 120
+  trunk_input_dim: 2
+  hidden_dim: 128
+  latent_dim: 128
+
+training:
+  seed: 42
+  device: "auto"
+  n_epochs: 1000
+  batch_size: 16
+  eval_batch_size: 16
+  num_workers: 0
+  lr: 0.001
+  weight_decay: 0.000001
+  grad_clip_norm: 1.0
+  eval_every: 10
+
+output:
+  base_dir: "runs/surrogate"
+  run_name: "deeponet_constant_inflow"
+  wandb:
+    enabled: true
+    project: "sumo-to-pde"
+    entity:
+    run_name:

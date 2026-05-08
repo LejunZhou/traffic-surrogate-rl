@@ -4,7 +4,7 @@ Baseline DeepONet surrogate model (pure PyTorch).
 Architecture: unstacked DeepONet with dot-product output.
 
 Branch net:
-- Input: [ramp_control(t); mainline_demand(t)] concatenated, shape (2 * T_ctrl,) = (240,)
+- Input: ramp_control(t), shape (T_ctrl,) = (120,) for the constant-inflow MVP
 - Encodes the input function pair into a latent vector of width p
 
 Trunk net:
@@ -23,21 +23,25 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-# TODO: implement BranchNet, TrunkNet, DeepONet
-
 
 class BranchNet(nn.Module):
-    """Encodes the input function [ramp_control; demand] → latent vector of width p."""
+    """Encodes the ramp-control input function into a latent vector of width p."""
 
     def __init__(self, input_dim: int, hidden_dim: int, output_dim: int) -> None:
         """
         Args:
-            input_dim: 2 * T_ctrl (= 240 for Phase 1).
+            input_dim: T_ctrl (= 120 for the constant-inflow MVP).
             hidden_dim: Width of hidden layers.
             output_dim: Latent width p (must match TrunkNet output_dim).
         """
         super().__init__()
-        raise NotImplementedError
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, output_dim),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -46,7 +50,7 @@ class BranchNet(nn.Module):
         Returns:
             shape (batch, output_dim)
         """
-        raise NotImplementedError
+        return self.net(x)
 
 
 class TrunkNet(nn.Module):
@@ -60,7 +64,13 @@ class TrunkNet(nn.Module):
             output_dim: Latent width p (must match BranchNet output_dim).
         """
         super().__init__()
-        raise NotImplementedError
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, output_dim),
+        )
 
     def forward(self, y: torch.Tensor) -> torch.Tensor:
         """
@@ -69,7 +79,10 @@ class TrunkNet(nn.Module):
         Returns:
             shape (batch, N_query, output_dim)
         """
-        raise NotImplementedError
+        batch, n_query, input_dim = y.shape
+        flat = y.reshape(batch * n_query, input_dim)
+        out = self.net(flat)
+        return out.reshape(batch, n_query, -1)
 
 
 class DeepONet(nn.Module):
@@ -77,16 +90,20 @@ class DeepONet(nn.Module):
 
     def __init__(self, branch_net: BranchNet, trunk_net: TrunkNet) -> None:
         super().__init__()
-        raise NotImplementedError
+        self.branch_net = branch_net
+        self.trunk_net = trunk_net
+        self.bias = nn.Parameter(torch.zeros(1))
 
     def forward(
         self, branch_input: torch.Tensor, trunk_input: torch.Tensor
     ) -> torch.Tensor:
         """
         Args:
-            branch_input: shape (batch, 2 * T_ctrl)
+            branch_input: shape (batch, T_ctrl)
             trunk_input:  shape (batch, N_query, 2)
         Returns:
             density predictions, shape (batch, N_query)
         """
-        raise NotImplementedError
+        branch = self.branch_net(branch_input)
+        trunk = self.trunk_net(trunk_input)
+        return torch.einsum("bp,bnp->bn", branch, trunk) + self.bias

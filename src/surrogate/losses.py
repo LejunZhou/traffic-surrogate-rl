@@ -12,9 +12,6 @@ Do NOT add physics-informed losses here unless explicitly requested.
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
-
-# TODO: implement loss functions
 
 
 def mse_loss(predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -27,4 +24,4 @@ def mse_loss(predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     Returns:
         Scalar MSE loss.
     """
-    raise NotImplementedError
+    return torch.mean((predictions - targets) ** 2)

@@ -12,5 +12,4 @@ set -euo pipefail
 CONFIG="${1:?Usage: $0 <config.yaml>}"
 
 echo "[train_surrogate] Config: $CONFIG"
-# TODO: invoke src/surrogate/train.py
-python -m surrogate.train --config "$CONFIG"
+PYTHONPATH="src${PYTHONPATH:+:$PYTHONPATH}" python -m surrogate.train --config "$CONFIG"

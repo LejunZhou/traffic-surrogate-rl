@@ -1,0 +1,29 @@
+# Dataset config for the first surrogate experiment.
+# Mainline inflow is fixed; only ramp control varies.
+
+base_sumo_config: "configs/sumo/phase1_1.yaml"
+
+dataset:
+  n_samples: 120
+  random_seed: 42
+
+  demand_levels:
+    - 1500
+
+  ramp_control_types:
+    - "constant"
+    - "piecewise_constant"
+    - "smooth"
+    - "ramp_step"
+
+splits:
+  train_frac: 0.7
+  val_frac: 0.15
+  test_frac: 0.15
+
+output:
+  raw_dir: "data/raw"
+  splits_dir: "data/splits"
+  network_dir: "data/raw/network"
+  save_heatmaps: true
+  heatmap_every_n: 10

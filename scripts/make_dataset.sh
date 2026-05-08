@@ -12,5 +12,4 @@ set -euo pipefail
 CONFIG="${1:?Usage: $0 <config.yaml>}"
 
 echo "[make_dataset] Config: $CONFIG"
-# TODO: invoke src/sumo_env/dataset_generation.py
-python -m sumo_env.dataset_generation --config "$CONFIG"
+PYTHONPATH="src${PYTHONPATH:+:$PYTHONPATH}" python -m sumo_env.dataset_generation --config "$CONFIG"

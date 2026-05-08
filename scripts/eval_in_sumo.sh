@@ -13,4 +13,4 @@ CONFIG="${1:?Usage: $0 <config.yaml>}"
 
 echo "[eval_in_sumo] Config: $CONFIG"
 # TODO: invoke src/rl/evaluate.py
-python -m rl.evaluate --config "$CONFIG"
+PYTHONPATH="src${PYTHONPATH:+:$PYTHONPATH}" python -m rl.evaluate --config "$CONFIG"

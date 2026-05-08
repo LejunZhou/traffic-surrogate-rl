@@ -13,4 +13,4 @@ CONFIG="${1:?Usage: $0 <config.yaml>}"
 
 echo "[train_ppo_surrogate] Config: $CONFIG"
 # TODO: invoke src/rl/train_ppo.py with env.type=surrogate
-python -m rl.train_ppo --config "$CONFIG"
+PYTHONPATH="src${PYTHONPATH:+:$PYTHONPATH}" python -m rl.train_ppo --config "$CONFIG"

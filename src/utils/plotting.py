@@ -77,7 +77,61 @@ def plot_density_heatmap(
         t_grid:    shape (T_ctrl,) — time points in seconds
         output_path: Save location for the plot (.png).
     """
-    raise NotImplementedError
+    err = predicted - true
+    vmin = float(min(np.min(predicted), np.min(true)))
+    vmax = float(max(np.max(predicted), np.max(true)))
+    err_abs = float(np.max(np.abs(err)))
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4), constrained_layout=True)
+    t_min, t_max = float(t_grid[0]), float(t_grid[-1])
+    x_min, x_max = float(x_grid[0]), float(x_grid[-1])
+    extent = [t_min, t_max, x_min, x_max]
+
+    im0 = axes[0].imshow(
+        true,
+        aspect="auto",
+        origin="lower",
+        extent=extent,
+        cmap="hot_r",
+        vmin=vmin,
+        vmax=vmax,
+        interpolation="nearest",
+    )
+    axes[0].set_title("SUMO true")
+    axes[0].set_xlabel("Time [s]")
+    axes[0].set_ylabel("Position [m]")
+    fig.colorbar(im0, ax=axes[0], label="Density [veh/km]")
+
+    im1 = axes[1].imshow(
+        predicted,
+        aspect="auto",
+        origin="lower",
+        extent=extent,
+        cmap="hot_r",
+        vmin=vmin,
+        vmax=vmax,
+        interpolation="nearest",
+    )
+    axes[1].set_title("DeepONet predicted")
+    axes[1].set_xlabel("Time [s]")
+    fig.colorbar(im1, ax=axes[1], label="Density [veh/km]")
+
+    im2 = axes[2].imshow(
+        err,
+        aspect="auto",
+        origin="lower",
+        extent=extent,
+        cmap="coolwarm",
+        vmin=-err_abs,
+        vmax=err_abs,
+        interpolation="nearest",
+    )
+    axes[2].set_title("Prediction error")
+    axes[2].set_xlabel("Time [s]")
+    fig.colorbar(im2, ax=axes[2], label="Pred - true")
+
+    fig.savefig(str(output_path), dpi=150)
+    plt.close(fig)
 
 
 def plot_reward_curve(

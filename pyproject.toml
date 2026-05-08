@@ -20,7 +20,7 @@ dependencies = [
     "numpy",
     "matplotlib",
     "pyyaml",
-    "tensorboard",
+    "wandb",
 ]
 
 [project.optional-dependencies]
