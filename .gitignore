@@ -83,3 +83,6 @@ Thumbs.db
 *.bak
 .env
 .env.*
+
+# ── Local-only reference material ────────────────────────────────────────────
+ref/

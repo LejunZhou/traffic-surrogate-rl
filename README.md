@@ -4,7 +4,7 @@ This repository implements a surrogate-accelerated reinforcement learning pipeli
 
 ## Pipeline
 
-1. Build a SUMO traffic simulation (single-lane highway + one on-ramp)
+1. Build a SUMO traffic simulation (2-lane highway + one on-ramp)
 2. Generate training data by sweeping over demand profiles and ramp metering signals
 3. Train a DeepONet surrogate to predict density trajectories from control inputs
 4. Wrap the surrogate as a Gymnasium environment for fast RL training
@@ -66,7 +66,7 @@ python scripts/run_rollout.py \
 
 ## Phase 1 scope
 
-- Single-lane highway, 2000 m, one on-ramp
+- 2-lane highway, 2000 m, one on-ramp
 - DeepONet trained on density trajectories only (speed/flow logged for diagnostics)
 - PPO observation: density at 20 detectors + current demand + normalized time index (22 features)
 - Reward: negative mean density (Phase 1 baseline)
