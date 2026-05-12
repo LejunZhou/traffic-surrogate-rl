@@ -1,0 +1,73 @@
+# Direct SUMO+RL PPO training config.
+# This path trains PPO against live SUMO through TraCI, not the surrogate.
+
+env:
+  type: "sumo"
+  sumo_config: "configs/sumo/phase1_1.yaml"
+  network_dir: "data/raw/rl_network"
+
+  # One constant mainline demand is sampled at each episode reset.
+  demand_levels:
+    - 1000
+    - 1500
+    - 2000
+
+  # Observation density normalization. These are reasonable smoke-test stats
+  # from the Phase 1 dataset notes; replace with split metadata when available.
+  density_mean: 16.563
+  density_std: 5.745
+
+  reward:
+    queue_penalty_weight: 0.01
+    queue_scale: 800
+    warmup_s: 300
+
+ppo:
+  policy: "MlpPolicy"
+  policy_kwargs:
+    net_arch:
+      pi: [128, 128]
+      vf: [256, 256]
+    activation_fn: "tanh"
+  n_steps: 120
+  batch_size: 120
+  n_epochs: 5
+  learning_rate: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  device: "auto"
+  verbose: 1
+
+training:
+  seed: 42
+  total_timesteps: 2400
+  checkpoint_freq: 1200
+  progress_bar: false
+  wandb_info_log_freq: 1
+
+evaluation:
+  # Override this with `--policy runs/rl/<run_dir>/final_model.zip`.
+  policy_path:
+  n_episodes: 3
+  deterministic: true
+  seed: 1000
+  output_dir: "runs/rl_eval/sumo_policy"
+  save_plots: true
+  max_plot_episodes: 3
+
+output:
+  base_dir: "runs/rl"
+  run_name: "ppo_sumo"
+  wandb:
+    enabled: true
+    project: "sumo-to-pde"
+    entity:
+    run_name: "ppo_sumo"
+    tags:
+      - "ppo"
+      - "sumo"
+      - "phase1_1"

@@ -1,0 +1,74 @@
+# PPO training config for the DeepONet surrogate environment.
+#
+# Road geometry and demand must follow configs/sumo/phase1_1.yaml. Do not
+# override demand_levels, queue arrival/discharge, or SUMO road fields here.
+
+env:
+  type: "surrogate"
+  sumo_config: "configs/sumo/phase1_1.yaml"
+
+  # Replace this with the trained surrogate checkpoint to use for PPO.
+  # For example: runs/surrogate/<timestamp>_deeponet_constant_inflow/best.pt
+  surrogate_checkpoint: "runs/surrogate/deeponet_constant_inflow_20260511_220310/best.pt"
+
+  device: "auto"
+
+  # Prevent negative physical densities from unstable surrogate predictions
+  # from feeding the reward/observation.
+  density_clip_min: 0.0
+
+  reward:
+    queue_penalty_weight: 0.01
+    queue_scale: 800
+    # Ignore reward for the first 10 control intervals while traffic develops.
+    warmup_s: 0
+
+ppo:
+  policy: "MlpPolicy"
+  policy_kwargs:
+    net_arch:
+      pi: [512, 512, 512]
+      vf: [512, 512, 512]
+    activation_fn: "tanh"
+  n_steps: 120
+  batch_size: 120
+  n_epochs: 5
+  learning_rate: 0.0001
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  device: "auto"
+  verbose: 1
+
+training:
+  seed: 42
+  total_timesteps: 2000000
+  checkpoint_freq: 100000
+  progress_bar: false
+  wandb_info_log_freq: 1000
+
+evaluation:
+  # Override this with `--policy runs/rl/<run_dir>/final_model.zip`.
+  policy_path: runs/rl/ppo_surrogate_20260512_020145/final_model.zip
+  n_episodes: 2
+  deterministic: true
+  seed: 1000
+  output_dir: "runs/rl_eval/surrogate_policy"
+  save_plots: true
+  max_plot_episodes: 2
+
+output:
+  base_dir: "runs/rl"
+  run_name: "ppo_surrogate"
+  wandb:
+    enabled: true
+    project: "sumo-to-pde"
+    entity:
+    run_name: "ppo_surrogate"
+    tags:
+      - "ppo"
+      - "surrogate"
+      - "phase1_1"
