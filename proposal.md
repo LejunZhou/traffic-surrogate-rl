@@ -117,18 +117,32 @@ Non-goals (Phase 1):
 - Physics-informed loss in DeepONet
 - Real-world calibration
 
-## SUMO setup on this Mac
+## SUMO setup
 
-SUMO is installed at `/Library/Frameworks/EclipseSUMO.framework/Versions/Current/EclipseSUMO`.
+Before running SUMO-based simulations in a fresh shell, make sure `sumo`,
+`netconvert`, and `duarouter` are on `PATH` and the SUMO Python bindings
+are importable.
 
-Before running SUMO-based simulations in a fresh shell, set these environment variables:
+**macOS (framework install):**
 ```bash
 export SUMO_HOME="/Library/Frameworks/EclipseSUMO.framework/Versions/Current/EclipseSUMO"
 export PYTHONPATH="$SUMO_HOME/share/sumo/tools:$PYTHONPATH"
 export PATH="$SUMO_HOME/bin:$PATH"
 ```
 
-If `sumo`, `netconvert`, or `duarouter` are "not found", the issue is usually environment setup, not a missing installation.
+**Windows (Eclipse SUMO MSI install):** the installer registers
+`SUMO_HOME` system-wide and adds `bin/` and `tools/` to `PATH`
+automatically. Typical install path:
+`C:\Program Files (x86)\Eclipse\Sumo\`. No shell exports needed.
+To verify in PowerShell:
+```powershell
+echo $env:SUMO_HOME
+Get-Command sumo, netconvert
+```
+
+If `sumo`, `netconvert`, or `duarouter` are "not found", the issue is
+usually environment setup (PATH or SUMO_HOME) rather than a missing
+installation.
 
 ## Engineering principles
 - Separate simulation, surrogate modeling, and RL code
@@ -175,10 +189,18 @@ traffic-surrogate-rl/
 │       ├── logging.py
 │       └── plotting.py
 ├── scripts/
-│   ├── make_dataset.sh
-│   ├── train_surrogate.sh
-│   ├── train_ppo_surrogate.sh
-│   └── eval_in_sumo.sh
+│   ├── make_dataset.sh             # M2: runs sumo_env.dataset_generation
+│   ├── train_surrogate.sh          # M3: runs surrogate.train
+│   ├── train_ppo_surrogate.sh      # M5: runs rl.train_ppo with env.type=surrogate
+│   ├── eval_in_sumo.sh             # M6: runs rl.evaluate on a saved PPO policy
+│   ├── run_rollout.py              # M1: single-rollout CLI for manual SUMO checks
+│   ├── inspect_rollout.py          # diagnostic: pretty-print one saved .npz rollout
+│   ├── run_diagnostic_suite.py     # diagnostic: batch over a set of policies
+│   ├── eval_constant_baselines.py  # M5b/M5c: roll out constant or learned policy in SurrogateEnv
+│   ├── eval_sumo_baselines.py      # M6: SumoEnv counterpart of the above
+│   └── run_m5b_sweep.py            # M5b/M5c: subprocess sweep driver over (beta, seed)
+├── tests/
+│   └── test_surrogate_env.py       # M4: pytest smoke tests for SurrogateEnv parity
 └── notebooks/
 
 ## Dataset conventions
@@ -253,9 +275,9 @@ The DeepONet is trained on complete input functions: given a full ramp control p
 
 During RL, the control signal is constructed incrementally — one action per step. At RL step k (0-indexed):
 1. The agent has chosen actions u(0), u(1), ..., u(k)
-2. The branch input is constructed as: [u(0), ..., u(k), 0, ..., 0 ; d(0), ..., d(T-1)]
-   - Ramp control: first k+1 entries are actual actions, remainder zero-padded to T_ctrl
-   - Demand: always the full profile (known in advance for the episode)
+2. The branch input is constructed as:
+   - **Design target (M3b, 240-dim):** `[u(0), ..., u(k), 0, ..., 0 ; d(0), ..., d(T-1)]` — ramp control first k+1 entries are actual actions, remainder zero-padded to T_ctrl; demand is the full known profile.
+   - **Currently implemented (M3, 120-dim):** `[u(0), ..., u(k), 0, ..., 0]` only — the mainline-demand half is dropped because the MVP runs at a fixed single demand and the surrogate is trained on a demand-filtered subset of the dataset (`constant_mainline_demand_vph: 1500` in `configs/surrogate/baseline.yaml`).
 3. The trunk queries all detector positions at time t_k: {(x_i, t_k) for i = 1..N_x}
 4. The DeepONet returns density predictions at those points → this becomes the observation
 5. The reward is computed from this density snapshot
@@ -265,11 +287,19 @@ This means the DeepONet is re-evaluated from scratch at every RL step (not autor
 Known risk — distribution shift:
 Training data contains fully-specified control signals. During RL rollout, partially-specified (zero-padded) signals are a distribution shift. The surrogate may produce unreliable density predictions for the zero-padded future portion, but we only query density at the current time t_k (not future times), which partially mitigates this.
 
-Phase 1 dataset design requirement:
-To support the zero-padded rollout formulation, the training dataset MUST include truncated/zero-padded control variants:
-- For each full simulation trajectory, generate additional training samples by truncating the control signal at random cut points k ∈ {1, ..., T_ctrl-1} and zero-padding the remainder
-- Query points for truncated samples should be restricted to t ≤ t_k (only the valid portion)
-- This is not optional — it is a core requirement for the surrogate to generalize to RL rollout conditions
+Phase 1 training pipeline requirement (how it's actually implemented):
+The zero-padded-prefix views the policy will see at RL time are
+generated at **training time** by `surrogate.datasets.TrafficDataset`
+via the `control_augmentation` block in
+`configs/surrogate/baseline.yaml` (default: 16 padded prefix views
+per train rollout, 0 for val/test). The raw M2 dataset on disk has
+only full-control rollouts; the augmentation expands them into
+~17× more training views without rerunning SUMO. For each padded
+view, target query points are automatically restricted to
+`t ≤ t_{prefix_len-1}` so the surrogate is never supervised on a
+time index that depends on the zero-padded future portion of the
+control signal. This is **not optional** — it is the mechanism that
+lets the surrogate generalize to RL rollout conditions.
 
 Additional mitigations:
 1. Monitor surrogate prediction error during RL evaluation by comparing surrogate predictions against SUMO ground truth for the same control sequence
@@ -311,7 +341,7 @@ Reward (Phase 1 shaped, Milestone 5c):
 
 Episode structure:
 - Episode length: T_ctrl = 120 steps (one full simulation horizon = 3600 s)
-- At reset: sample a demand profile from the controlled family
+- At reset: sample a demand value from `env.demand_profiles` in the PPO config. The current MVP pins `demand_profiles: [1500.0]` (single-element list → degenerate sampling at 1500 vph every episode). The design target — sampling from a 4-element family of low / medium / high constant + mild peak profiles — is the Milestone 2c follow-up.
 - No early termination in Phase 1
 
 Environment parity:

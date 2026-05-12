@@ -36,23 +36,25 @@ notebooks/        Exploratory notebooks
 ## Running the pipeline
 
 ```bash
-# 1. Generate dataset
-bash scripts/make_dataset.sh configs/experiments/phase1.yaml
+# 1. Generate dataset (M2: 120 SUMO rollouts at constant 1500 vph)
+bash scripts/make_dataset.sh configs/experiments/dataset_constant_inflow.yaml
 
-# 2. Train surrogate
+# 2. Train surrogate (M3: DeepONet on the dataset above)
 bash scripts/train_surrogate.sh configs/surrogate/baseline.yaml
 
-# 3. Train PPO in surrogate environment
+# 3. Train PPO in surrogate environment (M5)
 bash scripts/train_ppo_surrogate.sh configs/rl/ppo_surrogate.yaml
 
-# 4. Evaluate in SUMO
-bash scripts/eval_in_sumo.sh configs/experiments/phase1.yaml
+# 4. Evaluate a trained PPO policy in live SUMO (M6 native eval, or M6.5 transfer)
+bash scripts/eval_in_sumo.sh configs/rl/ppo_sumo.yaml runs/rl/<run_dir>/best_model.zip
 ```
 
 ### Quick start: run a single simulation
 
 ```bash
-# Set SUMO environment (macOS framework install)
+# macOS only: set SUMO environment (framework install).
+# Windows: SUMO_HOME and PATH are set by the Eclipse SUMO MSI installer
+# system-wide; no exports needed.
 export SUMO_HOME="/Library/Frameworks/EclipseSUMO.framework/Versions/Current/EclipseSUMO"
 export PYTHONPATH="$SUMO_HOME/share/sumo/tools:$PYTHONPATH"
 export PATH="$SUMO_HOME/bin:$PATH"
