@@ -276,6 +276,36 @@ def main() -> None:
         default=None,
         help="Override training.total_timesteps for smoke runs",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Override training.seed (useful for multi-seed sweeps)",
+    )
+    parser.add_argument(
+        "--reward-beta",
+        type=float,
+        default=None,
+        help="Override env.reward.beta (queue-penalty weight) — sweep helper",
+    )
+    parser.add_argument(
+        "--reward-alpha",
+        type=float,
+        default=None,
+        help="Override env.reward.alpha (mean-density weight)",
+    )
+    parser.add_argument(
+        "--reward-gamma",
+        type=float,
+        default=None,
+        help="Override env.reward.gamma (density-std weight)",
+    )
+    parser.add_argument(
+        "--run-name-suffix",
+        type=str,
+        default=None,
+        help="Append a suffix to output.run_name (useful for sweep runs)",
+    )
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parent.parent.parent
@@ -286,6 +316,22 @@ def main() -> None:
     cfg["project_root"] = str(project_root)
     if args.total_timesteps is not None:
         cfg.setdefault("training", {})["total_timesteps"] = int(args.total_timesteps)
+    if args.seed is not None:
+        cfg.setdefault("training", {})["seed"] = int(args.seed)
+    if any(v is not None for v in (args.reward_alpha, args.reward_beta, args.reward_gamma)):
+        env_cfg = cfg.setdefault("env", {})
+        reward_cfg = dict(env_cfg.get("reward") or {})
+        if args.reward_alpha is not None:
+            reward_cfg["alpha"] = float(args.reward_alpha)
+        if args.reward_beta is not None:
+            reward_cfg["beta"] = float(args.reward_beta)
+        if args.reward_gamma is not None:
+            reward_cfg["gamma"] = float(args.reward_gamma)
+        env_cfg["reward"] = reward_cfg
+    if args.run_name_suffix:
+        out_cfg = cfg.setdefault("output", {})
+        base_name = out_cfg.get("run_name", "ppo")
+        out_cfg["run_name"] = f"{base_name}_{args.run_name_suffix}"
     train(cfg)
 
 
