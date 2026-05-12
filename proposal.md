@@ -245,12 +245,13 @@ Additional mitigations:
 ## RL interface contract (Phase 1)
 
 Observation design:
-- Shape: (N_x + 2,) = (22,)
+- Shape: (N_x + 3,) = (22,) with N_x = 19 detectors on the current `phase1_1.yaml` geometry
 - Components:
-  - density[0:N_x]: density at each of the 20 detector locations at current time step (z-score normalized, same normalization as surrogate training)
+  - density[0:N_x]: density at each detector at the current control step (z-score normalized, same normalization as surrogate training)
   - demand[N_x]: current mainline demand at this time step (min-max normalized to [0, 1])
   - time[N_x+1]: current normalized time index = k / T_ctrl ∈ [0, 1]
-- Justification: the agent needs the current traffic state (density field) to decide the metering rate, the current demand level to adapt across demand regimes, and the time index because optimal metering strategy is time-dependent (e.g. more aggressive metering early when congestion is building vs. releasing the queue near episode end). Without time, the policy is forced to be purely reactive; with time, it can anticipate demand evolution. We do NOT include speed/flow (redundant given density in the 2-lane mainline configuration), ramp queue length (not directly available from the surrogate in Phase 1), or past actions (the surrogate handles temporal dependence internally via the full control history in the branch input).
+  - queue[N_x+2]: current on-ramp queue length, normalized by `queue_norm_scale` (default 100 vehicles). Unbounded; values can exceed 1.0 when queue is large.
+- Justification: the agent needs the current traffic state (density field) to decide the metering rate, the current demand level to adapt across demand regimes, the time index because optimal metering strategy is time-dependent, and the queue length because the shaped reward penalizes queue buildup (without queue in the obs, a stateless MLP policy is partially observable on a term that directly affects reward). We do NOT include speed/flow (redundant given density), throughput (logged in info, not yet a reward term), or past actions (the surrogate handles temporal dependence internally via the full control history in the branch input).
 
 Action:
 - Shape: (1,)
@@ -259,12 +260,21 @@ Action:
   - 1.0 = ramp fully open (all ramp demand enters)
 - Continuous action space (Box)
 
-Reward (Phase 1 baseline):
-- Computed by a shared reward function in src/rl/reward.py, used identically by both surrogate and SUMO environments
-- Phase 1 baseline: reward = -(mean density across all N_x detectors at current step)
-- Lower density → higher reward → less congestion
-- Must operate on the same scale in both environments (denormalize surrogate predictions before reward computation, or compute reward in normalized space consistently)
-- Future reward extensions (Phase 2+): add throughput bonus, on-ramp queue length penalty, and/or total travel time terms. The baseline reward is intentionally simple to validate the pipeline before adding multi-objective shaping.
+Analytical queue model (shared by both envs):
+- `queue[k+1] = max(0, queue[k] + (1 − u_k) · ramp_demand_vph · dt_ctrl_s / 3600)` with `queue[0] = 0`.
+- Same formula in `SurrogateEnv` and `SumoEnv` for parity: the surrogate-vs-SUMO comparison in M6/M7 reflects only the density-dynamics gap, not a reward-signal gap.
+- SUMO's measured queue length (`traci.edge.getLastStepVehicleNumber("ramp")`) is still recorded in the info dict for diagnostics but is not used as the reward signal.
+
+Reward (Phase 1 shaped):
+- Computed by a shared reward function `compute_reward(density, queue_length, weights)` in `src/rl/reward.py`, used identically by both surrogate and SUMO environments.
+- Formula: `reward = -alpha · mean(density) - beta · queue_length - gamma · std(density)` with `density` in physical units (veh/km).
+- Default weights: `alpha=1.0, beta=0.1, gamma=1.0`. Tunable per-experiment in the PPO config YAML.
+- Term motivation:
+  - `-alpha · mean(density)`: penalizes mainline congestion (the original Phase-1 baseline).
+  - `-beta · queue_length`: penalizes the on-ramp queue, so closing the ramp entirely is no longer free.
+  - `-gamma · std(density)`: rewards spatially uniform density, discouraging local hotspots.
+- Empirical rationale: the original `alpha=1, beta=0, gamma=0` baseline converged to the degenerate `u≡0` policy because the reward had a corner solution at "close the ramp completely" (Milestone 5 finding, archived on `mvp-v1-old-scenario`). The queue term creates the counterbalance that makes the metering problem non-trivial.
+- Future reward extensions (Phase 2+): throughput bonus, total travel time penalty, fairness across vehicles. The current shaped reward is still intentionally simple; weights can be retuned without code changes.
 
 Episode structure:
 - Episode length: T_ctrl = 120 steps (one full simulation horizon = 3600 s)
