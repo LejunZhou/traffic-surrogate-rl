@@ -109,11 +109,17 @@ Result:
 - queue final = 797.7 (essentially u=0's 800).
 - throughput = 1475 vph (mainline only).
 
-This is *not* the failure mode of "PPO can't learn" — it's the failure
-mode of "PPO didn't get enough updates to escape the first corner it
-sampled into". The shaped-reward landscape is correct (the surrogate-
-side M5c training found u=0.688 on the same reward), it's just slow
-to find via direct SUMO simulation.
+**Initially we interpreted this as "PPO didn't get enough updates"**
+— the surrogate-side M5c training found u=0.688 on the same reward,
+so the reward landscape was clearly correct; M6's 42 PPO iterations
+just looked too few. **Milestone 6b reran this same setup at 100k
+SUMO timesteps (209 PPO iterations, matching M5c exactly) and
+refuted that interpretation**: even at matched iteration count
+SUMO PPO collapses to u=0 with reward -2941. See
+`_progress/milestone_6b_progress.md` for the full diagnostic. The
+real bottleneck appears to be SUMO's per-step reward noise
+destabilizing PPO's value function and exploration — not the
+sample budget.
 
 ## 6.5 — Transfer eval (M5c surrogate-trained policy on SUMO, seed=0)
 
@@ -155,21 +161,29 @@ Full table at seed=0 on the M5c shaped reward, **evaluated in SUMO**:
 | u=0.5 constant      | **-1238.5** | 0.500 (0) | 18.57 / 5.12 | 400.0 | 1867 vph | **best constant** |
 | u=1.0 constant      | -1431.7 | 1.000 (0)     | 22.38 / 9.55 | 0.0   | 2260 vph | ramp wide open |
 | **M5c (surrogate-trained, transferred)** | **-1525.6** | **0.729 (0.431)** | 20.35 / 8.37 | 217.1 | **2043 vph** | **interior policy** |
-| M6 (SUMO-trained)   | -2919.2 | 0.003 (0.015) | 15.85 / 3.17 | 797.7 | 1475 vph | collapsed to u≈0 |
+| M6 (SUMO-trained, 20k ts)   | -2919.2 | 0.003 (0.015) | 15.85 / 3.17 | 797.7 | 1475 vph | collapsed to u≈0 |
+| **M6b (SUMO-trained, 100k ts)** | **-2941.2** | **0.000 (0.000)** | 15.83 / 3.16 | 800.0 | 1473 vph | **fully collapsed, indistinguishable from u=0** |
 
 **Wall-clock + sample-efficiency comparison:**
 
 | Run | Backend | Wall clock | Total timesteps | PPO updates | Result |
 |---|---|---|---|---|---|
 | M5c | DeepONet surrogate | **185 s** (~3 min) | 100,000 | 2,080 | interior policy u≈0.688 |
-| M6  | Live SUMO via TraCI | **2105 s** (~35 min) | 20,000  |   410 | collapsed policy u≈0.003 |
+| M6  | Live SUMO via TraCI |  2,105 s (~35 min)  |  20,000 |   410 | collapsed policy u≈0.003 |
+| M6b | Live SUMO via TraCI | **9,854 s (~2.7 h)** | 100,000 | 2,080 | **fully collapsed policy u≡0** |
 
-Surrogate is **~58× faster per timestep** (555 ts/s vs 9.5 ts/s) and
-got the surrogate run **5× more PPO updates** in **~1/11 of the wall
-clock**. Apples-to-apples (matched PPO updates), the surrogate path
-would need 100k surrogate timesteps to roughly match an estimated
-500k SUMO timesteps — which would take 14.5 hours on this machine
-(extrapolating 9.5 ts/s).
+At **matched PPO iteration count (M5c vs M6b, both 209 iterations,
+2,080 gradient updates)**, the surrogate path is **~53× faster wall
+clock** (185 s vs 9,854 s) AND **produces a non-trivially better
+policy** (action mean 0.688 with real metering behavior vs literal
+constant u=0). The "M6 just needed more timesteps" hypothesis from
+the M6 progress note above is refuted by M6b — direct SUMO PPO under
+the current hyperparameters cannot escape the u=0 basin at this
+scenario at any tested budget. The remaining surrogate-acceleration
+story is therefore not "the surrogate is faster" but "**the
+surrogate enables learning that direct SUMO training does not
+achieve**" at matched compute. Full M6b diagnostic and proposed
+M6c follow-ups in `_progress/milestone_6b_progress.md`.
 
 ## Acceptance verdict
 
