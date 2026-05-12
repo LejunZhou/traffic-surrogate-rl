@@ -55,7 +55,11 @@ Start simple. Do NOT add complexity unless explicitly requested.
 
 Phase 1:
 - deterministic setting
-- 2-lane mainline highway + single-lane on-ramp
+- 1-lane mainline highway + 100 m acceleration lane + single-lane on-ramp
+  (the design originally specified a 2-lane mainline + zipper merge in
+  Milestone 1.1, which worked but was superseded by a 1-lane + accel
+  lane geometry in the network refresh; both layouts produced 0
+  teleports at this demand)
 - one on-ramp
 - baseline DeepONet
 - baseline PPO
@@ -69,23 +73,37 @@ Phase 2 candidates:
 - more realistic traffic PDE priors
 - multi-ramp / multi-agent control
 
-## Phase 1 design decisions
+## Phase 1 design decisions (as built)
+
+The implemented scenario constants are pinned in
+`configs/sumo/phase1_1.yaml` and the demand override in
+`configs/experiments/dataset_constant_inflow.yaml`; those files are the
+canonical source of truth and the bullets below are a descriptive
+summary.
 
 Physical scenario:
 - Highway length: 2000 m
-- Lanes: 2
-- On-ramp position: 500 m from upstream boundary
+- Lanes: 1 (with 100 m acceleration lane downstream of the merge; this
+  replaces the original Milestone 1.1 "2-lane mainline + zipper merge"
+  layout)
+- On-ramp position: 1300 m from upstream boundary
 - On-ramp length: 200 m
 - Speed limit: 120 km/h (33.33 m/s)
 - Simulation duration: 3600 s (1 hour)
 - Control step interval: 30 s → T_ctrl = 120 steps
-- Detector spacing: 100 m → N_x = 20 detectors along the mainline
+- Detector spacing: 100 m starting at 100 m → N_x = 19 detectors along
+  the mainline at positions [100, 200, …, 1900] m
 
-Mainline demand:
-- Small controlled family of demand profiles, not a single fixed profile
-- Profiles: low constant (e.g. 1000 veh/hr), medium constant (1500), high constant (2000), mild peak (ramps from 1200 to 2200 and back)
-- At dataset generation time, each simulation samples one demand profile
-- At RL episode reset, one demand profile is sampled for the episode
+Mainline demand (built):
+- Single constant 1500 vph throughout every episode and across every
+  training run. Ramp demand cap fixed at 800 vph.
+- This is a simplification of the original Phase 1 plan, which called
+  for a "small controlled family" of demand profiles (low ≈ 1000 vph,
+  medium 1500, high 2000, mild peak ramping 1200 → 2200 → 1200) sampled
+  per episode. The family is **deferred to Milestone 2c** and requires
+  an M2 dataset rerun across demand levels plus a 240-dim DeepONet
+  branch input (concatenating `mainline_demand(t)` and
+  `ramp_control(t)`).
 
 Tooling:
 - DeepONet: pure PyTorch (no deepxde)
@@ -99,18 +117,32 @@ Non-goals (Phase 1):
 - Physics-informed loss in DeepONet
 - Real-world calibration
 
-## SUMO setup on this Mac
+## SUMO setup
 
-SUMO is installed at `/Library/Frameworks/EclipseSUMO.framework/Versions/Current/EclipseSUMO`.
+Before running SUMO-based simulations in a fresh shell, make sure `sumo`,
+`netconvert`, and `duarouter` are on `PATH` and the SUMO Python bindings
+are importable.
 
-Before running SUMO-based simulations in a fresh shell, set these environment variables:
+**macOS (framework install):**
 ```bash
 export SUMO_HOME="/Library/Frameworks/EclipseSUMO.framework/Versions/Current/EclipseSUMO"
 export PYTHONPATH="$SUMO_HOME/share/sumo/tools:$PYTHONPATH"
 export PATH="$SUMO_HOME/bin:$PATH"
 ```
 
-If `sumo`, `netconvert`, or `duarouter` are "not found", the issue is usually environment setup, not a missing installation.
+**Windows (Eclipse SUMO MSI install):** the installer registers
+`SUMO_HOME` system-wide and adds `bin/` and `tools/` to `PATH`
+automatically. Typical install path:
+`C:\Program Files (x86)\Eclipse\Sumo\`. No shell exports needed.
+To verify in PowerShell:
+```powershell
+echo $env:SUMO_HOME
+Get-Command sumo, netconvert
+```
+
+If `sumo`, `netconvert`, or `duarouter` are "not found", the issue is
+usually environment setup (PATH or SUMO_HOME) rather than a missing
+installation.
 
 ## Engineering principles
 - Separate simulation, surrogate modeling, and RL code
@@ -157,10 +189,18 @@ traffic-surrogate-rl/
 │       ├── logging.py
 │       └── plotting.py
 ├── scripts/
-│   ├── make_dataset.sh
-│   ├── train_surrogate.sh
-│   ├── train_ppo_surrogate.sh
-│   └── eval_in_sumo.sh
+│   ├── make_dataset.sh             # M2: runs sumo_env.dataset_generation
+│   ├── train_surrogate.sh          # M3: runs surrogate.train
+│   ├── train_ppo_surrogate.sh      # M5: runs rl.train_ppo with env.type=surrogate
+│   ├── eval_in_sumo.sh             # M6: runs rl.evaluate on a saved PPO policy
+│   ├── run_rollout.py              # M1: single-rollout CLI for manual SUMO checks
+│   ├── inspect_rollout.py          # diagnostic: pretty-print one saved .npz rollout
+│   ├── run_diagnostic_suite.py     # diagnostic: batch over a set of policies
+│   ├── eval_constant_baselines.py  # M5b/M5c: roll out constant or learned policy in SurrogateEnv
+│   ├── eval_sumo_baselines.py      # M6: SumoEnv counterpart of the above
+│   └── run_m5b_sweep.py            # M5b/M5c: subprocess sweep driver over (beta, seed)
+├── tests/
+│   └── test_surrogate_env.py       # M4: pytest smoke tests for SurrogateEnv parity
 └── notebooks/
 
 ## Dataset conventions
@@ -184,11 +224,26 @@ Preferred saved fields:
 
 Architecture: unstacked DeepONet with dot-product output.
 
-Branch net input:
+**Implementation status:** This section describes the multi-demand
+Phase 1 *design target*. The current Milestone 3 surrogate trains on a
+single constant 1500 vph dataset and uses a **120-dim branch input
+(ramp_control only)**, dropping the mainline_demand concatenation.
+Upgrading to the 240-dim form below is **Milestone 3b**, blocked on
+Milestone 2c building a multi-demand dataset.
+
+Branch net input (design target — M3b):
 - Concatenation of [ramp_control(t); mainline_demand(t)]
 - Shape: (2 * T_ctrl,) = (240,)
 - ramp_control values ∈ [0, 1] (metering rate)
 - mainline_demand values normalized (min-max across the demand family)
+
+Branch net input (currently implemented — M3):
+- ramp_control(t) only
+- Shape: (T_ctrl,) = (120,)
+- ramp_control values ∈ [0, 1]
+- Mainline demand is filtered to a single value (1500 vph) at dataset
+  load time via `data.constant_mainline_demand_vph` in
+  `configs/surrogate/baseline.yaml`
 
 Trunk net input:
 - Query coordinates (x, t), each normalized to [0, 1]
@@ -220,9 +275,9 @@ The DeepONet is trained on complete input functions: given a full ramp control p
 
 During RL, the control signal is constructed incrementally — one action per step. At RL step k (0-indexed):
 1. The agent has chosen actions u(0), u(1), ..., u(k)
-2. The branch input is constructed as: [u(0), ..., u(k), 0, ..., 0 ; d(0), ..., d(T-1)]
-   - Ramp control: first k+1 entries are actual actions, remainder zero-padded to T_ctrl
-   - Demand: always the full profile (known in advance for the episode)
+2. The branch input is constructed as:
+   - **Design target (M3b, 240-dim):** `[u(0), ..., u(k), 0, ..., 0 ; d(0), ..., d(T-1)]` — ramp control first k+1 entries are actual actions, remainder zero-padded to T_ctrl; demand is the full known profile.
+   - **Currently implemented (M3, 120-dim):** `[u(0), ..., u(k), 0, ..., 0]` only — the mainline-demand half is dropped because the MVP runs at a fixed single demand and the surrogate is trained on a demand-filtered subset of the dataset (`constant_mainline_demand_vph: 1500` in `configs/surrogate/baseline.yaml`).
 3. The trunk queries all detector positions at time t_k: {(x_i, t_k) for i = 1..N_x}
 4. The DeepONet returns density predictions at those points → this becomes the observation
 5. The reward is computed from this density snapshot
@@ -232,11 +287,19 @@ This means the DeepONet is re-evaluated from scratch at every RL step (not autor
 Known risk — distribution shift:
 Training data contains fully-specified control signals. During RL rollout, partially-specified (zero-padded) signals are a distribution shift. The surrogate may produce unreliable density predictions for the zero-padded future portion, but we only query density at the current time t_k (not future times), which partially mitigates this.
 
-Phase 1 dataset design requirement:
-To support the zero-padded rollout formulation, the training dataset MUST include truncated/zero-padded control variants:
-- For each full simulation trajectory, generate additional training samples by truncating the control signal at random cut points k ∈ {1, ..., T_ctrl-1} and zero-padding the remainder
-- Query points for truncated samples should be restricted to t ≤ t_k (only the valid portion)
-- This is not optional — it is a core requirement for the surrogate to generalize to RL rollout conditions
+Phase 1 training pipeline requirement (how it's actually implemented):
+The zero-padded-prefix views the policy will see at RL time are
+generated at **training time** by `surrogate.datasets.TrafficDataset`
+via the `control_augmentation` block in
+`configs/surrogate/baseline.yaml` (default: 16 padded prefix views
+per train rollout, 0 for val/test). The raw M2 dataset on disk has
+only full-control rollouts; the augmentation expands them into
+~17× more training views without rerunning SUMO. For each padded
+view, target query points are automatically restricted to
+`t ≤ t_{prefix_len-1}` so the surrogate is never supervised on a
+time index that depends on the zero-padded future portion of the
+control signal. This is **not optional** — it is the mechanism that
+lets the surrogate generalize to RL rollout conditions.
 
 Additional mitigations:
 1. Monitor surrogate prediction error during RL evaluation by comparing surrogate predictions against SUMO ground truth for the same control sequence
@@ -245,12 +308,13 @@ Additional mitigations:
 ## RL interface contract (Phase 1)
 
 Observation design:
-- Shape: (N_x + 2,) = (22,)
+- Shape: (N_x + 3,) = (22,) with N_x = 19 detectors on the current `phase1_1.yaml` geometry
 - Components:
-  - density[0:N_x]: density at each of the 20 detector locations at current time step (z-score normalized, same normalization as surrogate training)
+  - density[0:N_x]: density at each detector at the current control step (z-score normalized, same normalization as surrogate training)
   - demand[N_x]: current mainline demand at this time step (min-max normalized to [0, 1])
   - time[N_x+1]: current normalized time index = k / T_ctrl ∈ [0, 1]
-- Justification: the agent needs the current traffic state (density field) to decide the metering rate, the current demand level to adapt across demand regimes, and the time index because optimal metering strategy is time-dependent (e.g. more aggressive metering early when congestion is building vs. releasing the queue near episode end). Without time, the policy is forced to be purely reactive; with time, it can anticipate demand evolution. We do NOT include speed/flow (redundant given density in the 2-lane mainline configuration), ramp queue length (not directly available from the surrogate in Phase 1), or past actions (the surrogate handles temporal dependence internally via the full control history in the branch input).
+  - queue[N_x+2]: current on-ramp queue length, normalized by `queue_norm_scale` (default 100 vehicles). Unbounded; values can exceed 1.0 when queue is large.
+- Justification: the agent needs the current traffic state (density field) to decide the metering rate, the current demand level to adapt across demand regimes, the time index because optimal metering strategy is time-dependent, and the queue length because the shaped reward penalizes queue buildup (without queue in the obs, a stateless MLP policy is partially observable on a term that directly affects reward). We do NOT include speed/flow (redundant given density), throughput (logged in info, not yet a reward term), or past actions (the surrogate handles temporal dependence internally via the full control history in the branch input).
 
 Action:
 - Shape: (1,)
@@ -259,16 +323,25 @@ Action:
   - 1.0 = ramp fully open (all ramp demand enters)
 - Continuous action space (Box)
 
-Reward (Phase 1 baseline):
-- Computed by a shared reward function in src/rl/reward.py, used identically by both surrogate and SUMO environments
-- Phase 1 baseline: reward = -(mean density across all N_x detectors at current step)
-- Lower density → higher reward → less congestion
-- Must operate on the same scale in both environments (denormalize surrogate predictions before reward computation, or compute reward in normalized space consistently)
-- Future reward extensions (Phase 2+): add throughput bonus, on-ramp queue length penalty, and/or total travel time terms. The baseline reward is intentionally simple to validate the pipeline before adding multi-objective shaping.
+Analytical queue model (shared by both envs):
+- `queue[k+1] = max(0, queue[k] + (1 − u_k) · ramp_demand_vph · dt_ctrl_s / 3600)` with `queue[0] = 0`.
+- Same formula in `SurrogateEnv` and `SumoEnv` for parity: the surrogate-vs-SUMO comparison in M6/M7 reflects only the density-dynamics gap, not a reward-signal gap.
+- SUMO's measured queue length (`traci.edge.getLastStepVehicleNumber("ramp")`) is still recorded in the info dict for diagnostics but is not used as the reward signal.
+
+Reward (Phase 1 shaped, Milestone 5c):
+- Computed by a shared reward function `compute_reward(density, queue_length, weights)` in `src/rl/reward.py`, used identically by both surrogate and SUMO environments.
+- Formula (nonlinear): `reward = -alpha · max(0, mean(density) - rho_freeflow) - beta · (queue_length / queue_norm)^2 - gamma · std(density)` with `density` in physical units (veh/km).
+- Default weights: `alpha=1.0, beta=1.0, gamma=1.0, rho_freeflow=20.0, queue_norm=100.0`. All five are tunable per-experiment in the PPO config YAML.
+- Term motivation:
+  - `-alpha · max(0, mean(density) - rho_freeflow)`: ReLU penalty on density excess. Operation below free-flow density (mainline not yet congested) costs nothing; the term only activates when mean density crosses `rho_freeflow`, which on the current scenario corresponds roughly to the u=1.0 corner.
+  - `-beta · (queue_length / queue_norm)^2`: quadratic penalty on queue. Cost grows fast as the queue builds, so long queues are heavily penalized while short queues are cheap. Replaces the linear queue term used in M5/M5b.
+  - `-gamma · std(density)`: rewards spatially uniform density, discouraging local hotspots. Unchanged from M5.
+- Empirical rationale: M5b's linear `-beta · queue_length` produced a structural corner trap at u=1.0 because the queue is identically 0 at that corner, making the term inactive regardless of beta. The ReLU-on-density + quadratic-on-queue shape breaks this by penalizing the u=1.0 corner specifically when its mean density crosses `rho_freeflow`, while still penalizing closer-to-closure policies non-linearly. See `_progress/milestone_5b_progress.md` §5b.5 for the linear-corner diagnostic and `_progress/milestone_5c_progress.md` for the M5c validation run.
+- Future reward extensions (Phase 2+): quadratic ReLU on density excess (sharper congestion penalty), piecewise queue with a hard "unacceptable" threshold, throughput bonus, total travel time penalty. The current shape is still intentionally simple; weights and the two thresholds (`rho_freeflow`, `queue_norm`) can be retuned without code changes.
 
 Episode structure:
 - Episode length: T_ctrl = 120 steps (one full simulation horizon = 3600 s)
-- At reset: sample a demand profile from the controlled family
+- At reset: sample a demand value from `env.demand_profiles` in the PPO config. The current MVP pins `demand_profiles: [1500.0]` (single-element list → degenerate sampling at 1500 vph every episode). The design target — sampling from a 4-element family of low / medium / high constant + mild peak profiles — is the Milestone 2c follow-up.
 - No early termination in Phase 1
 
 Environment parity:

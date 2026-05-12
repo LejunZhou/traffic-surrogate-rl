@@ -32,7 +32,7 @@ except ImportError as exc:
         "export PYTHONPATH=$SUMO_HOME/share/sumo/tools:$PYTHONPATH"
     ) from exc
 
-from rl.reward import compute_reward
+from rl.reward import RewardWeights, compute_reward
 from sumo_env.detectors import build_detector_file, get_detector_ids_per_lane, get_x_grid
 from sumo_env.network_builder import build_network, _write_routes
 from utils.config import load_config, merge_configs
@@ -87,6 +87,16 @@ class SumoEnv(gym.Env):
         self.density_mean = float(self.env_config.get("density_mean", 0.0))
         self.density_std = max(float(self.env_config.get("density_std", 1.0)), 1e-6)
 
+        # Shaped reward (Phase 1): -alpha*mean(density) -beta*queue -gamma*std(density).
+        # See proposal.md §"Reward (Phase 1 shaped)" for term motivation and
+        # the analytical queue model shared with SurrogateEnv.
+        self._reward_weights = RewardWeights.from_config(
+            self.env_config.get("reward")
+        )
+        self.queue_norm_scale = max(
+            float(self.env_config.get("queue_norm_scale", 100.0)), 1e-6
+        )
+
         self.det_ids_per_lane = get_detector_ids_per_lane(self.sumo_config)
         self.x_grid = get_x_grid(self.sumo_config)
         self.N_x = len(self.det_ids_per_lane)
@@ -114,7 +124,7 @@ class SumoEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(self.N_x + 2,),
+            shape=(self.N_x + 3,),
             dtype=np.float32,
         )
 
@@ -123,6 +133,7 @@ class SumoEnv(gym.Env):
         self.k = 0
         self.current_demand_vph = float(self.demand_levels[0])
         self.current_density = np.zeros(self.N_x, dtype=np.float32)
+        self._analytical_queue = 0.0
         self._started = False
         self._veh_counter = 0
         self._frac_accumulator = 0.0
@@ -184,6 +195,7 @@ class SumoEnv(gym.Env):
         self.episode_index += 1
         self.k = 0
         self.current_density = np.zeros(self.N_x, dtype=np.float32)
+        self._analytical_queue = 0.0
         self._veh_counter = 0
         self._frac_accumulator = 0.0
         self._insert_attempts = 0
@@ -222,7 +234,16 @@ class SumoEnv(gym.Env):
         ramp_rate = float(np.clip(np.asarray(action, dtype=np.float32).reshape(-1)[0], 0.0, 1.0))
         density, speed, flow, interval_info = self._advance_control_interval(ramp_rate)
         self.current_density = density
-        reward = compute_reward(density)
+
+        # Analytical queue update (mirrors SurrogateEnv for env parity; SUMO's
+        # measured queue is still in interval_info / info for diagnostics).
+        queue_growth = (1.0 - ramp_rate) * self.ramp_demand_vph * self.dt_ctrl / 3600.0
+        self._analytical_queue = max(0.0, self._analytical_queue + queue_growth)
+        reward = compute_reward(
+            density,
+            queue_length=self._analytical_queue,
+            weights=self._reward_weights,
+        )
 
         self.k += 1
         terminated = self.k >= self.T_ctrl
@@ -236,9 +257,11 @@ class SumoEnv(gym.Env):
             "speed": speed.copy(),
             "flow": flow.copy(),
             "mean_density": float(np.mean(density)),
+            "std_density": float(np.std(density)),
             "mean_speed": float(np.mean(speed)),
             "mean_flow": float(np.mean(flow)),
             "demand_vph": self.current_demand_vph,
+            "analytical_queue": self._analytical_queue,
             "arrived_vehicles": self._arrived_vehicles,
             "throughput_vph": self._throughput_vph(),
             "insert_attempts": self._insert_attempts,
@@ -362,10 +385,11 @@ class SumoEnv(gym.Env):
         density_norm = (self.current_density - self.density_mean) / self.density_std
         demand_norm = self._normalize_demand(self.current_demand_vph)
         time_norm = float(min(self.k, self.T_ctrl) / max(self.T_ctrl, 1))
+        queue_norm = float(self._analytical_queue / self.queue_norm_scale)
         return np.concatenate(
             [
                 density_norm.astype(np.float32),
-                np.array([demand_norm, time_norm], dtype=np.float32),
+                np.array([demand_norm, time_norm, queue_norm], dtype=np.float32),
             ]
         )
 
