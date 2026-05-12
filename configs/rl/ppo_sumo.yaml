@@ -1,0 +1,76 @@
+# PPO training directly in SUMO via TraCI (Milestone 6).
+# Pairs with src/rl/train_ppo.py via env.type=sumo.
+# Uses the M5c shaped reward so this can be compared apples-to-apples
+# with the surrogate-trained policy at runs/ppo/.../m5c_seed0/best_model.zip.
+
+env:
+  type: "sumo"
+
+  # Path to the SUMO scenario config (network / simulation / detectors /
+  # demand defaults). SumoEnv builds the network + routes from this on
+  # first reset(); subsequent resets reuse the same network files.
+  sumo_config: "configs/sumo/phase1_1.yaml"
+
+  # Demand sampling at reset(). Single-element list = degenerate sample
+  # to 1500 vph every episode. Matches the M5c training distribution.
+  demand_levels: [1500.0]
+
+  # z-score normalization for the density obs component. Pinned to the
+  # M2 training-set stats so the obs distribution matches what the M5c
+  # surrogate policy expects when transferred (M6.5).
+  density_mean: 18.730
+  density_std: 5.971
+
+  # Obs-side queue normalizer (must match SurrogateEnv's value if the
+  # M5c policy is to receive identically-scaled observations during
+  # transfer). 100.0 matches configs/rl/ppo_surrogate.yaml.
+  queue_norm_scale: 100.0
+
+  # Shaped reward — M5c form. Identical to the surrogate config.
+  reward:
+    alpha: 1.0
+    beta: 1.0
+    gamma: 1.0
+    rho_freeflow: 20.0
+    queue_norm: 100.0
+
+  # SumoEnv-specific
+  sumo_binary: "sumo"
+  network_dir: "data/raw/rl_network"
+
+ppo:
+  policy: "MlpPolicy"
+  n_steps: 480          # 4 episodes per rollout (kept same as M5c for parity)
+  batch_size: 120
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  learning_rate: 0.0003
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+
+training:
+  # IMPORTANT: SUMO+RL is much slower than surrogate+RL. With ~10-30 s
+  # per episode, 20k timesteps ≈ 167 episodes ≈ 30-90 min wall clock.
+  # The M6.1 benchmark step (see milestone_6_plan.md) sets a real
+  # number; this is a placeholder until then.
+  total_timesteps: 20000
+
+  # EvalCallback disabled for SUMO: each eval would run 5 SUMO episodes
+  # (~1-3 min each) every 4800 timesteps. The Monitor CSV already
+  # records per-rollout training reward, which is sufficient.
+  eval_freq: 0
+  n_eval_episodes: 5
+
+  # CheckpointCallback enabled so we don't lose progress if the run is
+  # interrupted. Every 2400 timesteps = ~20 episodes.
+  checkpoint_freq: 2400
+
+  seed: 42
+  progress_bar: false
+
+output:
+  base_dir: "runs/rl"
+  run_name: "ppo_sumo_constant_inflow"
