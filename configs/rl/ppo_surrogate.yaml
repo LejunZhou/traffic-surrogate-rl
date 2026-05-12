@@ -1,0 +1,41 @@
+# PPO training on the DeepONet surrogate (Milestone 5).
+# Pairs with src/rl/train_ppo.py via env.type=surrogate.
+
+env:
+  type: "surrogate"
+  # "auto" → pick the latest runs/surrogate/deeponet_constant_inflow_*/best.pt
+  # at run time. Replace with a literal path to pin a specific checkpoint.
+  surrogate_checkpoint: "auto"
+  sumo_config: "configs/sumo/phase1_1.yaml"  # auto-derives N_x, T_ctrl, etc.
+  demand_profiles: [1500.0]
+  demand_min: 1500.0
+  demand_max: 1500.0
+  queue_norm_scale: 100.0
+  device: "cpu"
+  reward:
+    alpha: 1.0   # weight on -mean(density)
+    beta: 0.1    # weight on -queue_length
+    gamma: 1.0   # weight on -std(density)
+
+ppo:
+  policy: "MlpPolicy"
+  n_steps: 480           # 4 episodes per rollout (120 * 4)
+  batch_size: 120
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  learning_rate: 0.0003
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+
+training:
+  total_timesteps: 100000
+  eval_freq: 4800        # ≈ every 10 rollouts
+  n_eval_episodes: 5
+  seed: 42
+
+output:
+  base_dir: "runs/ppo"
+  run_name: "ppo_surrogate_constant_inflow"
