@@ -9,8 +9,11 @@ data:
   raw_dir: "data/raw/training_data"
   split_index_file: "data/splits/split_index.json"
   metadata_file: "data/splits/metadata.json"
-  # null means: use demand.mainline_demand_vph from data.sumo_config.
-  constant_mainline_demand_vph:
+  # The M2 dataset was generated with dataset_constant_inflow.yaml's
+  # demand_levels: [1500], which overrides phase1_1.yaml's 2000 vph
+  # default. Pin the filter explicitly so apply_sumo_config_defaults
+  # doesn't auto-fill 2000 (which would match zero samples).
+  constant_mainline_demand_vph: 1500
 
   # Random query points per rollout during training.
   # Validation/test use the full N_x x T_ctrl grid.
@@ -54,7 +57,7 @@ output:
   base_dir: "runs/surrogate"
   run_name: "deeponet_constant_inflow"
   wandb:
-    enabled: true
+    enabled: false
     project: "sumo-to-pde"
     entity:
     run_name: "surrogate"

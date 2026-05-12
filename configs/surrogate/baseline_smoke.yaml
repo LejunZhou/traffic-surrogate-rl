@@ -1,0 +1,51 @@
+# Smoke variant of baseline DeepONet config — 5 epochs, eval every epoch.
+# Used to verify the training pipeline wires end-to-end against wilson's
+# updated surrogate/train.py (apply_sumo_config_defaults +
+# control_augmentation views).
+
+data:
+  sumo_config: "configs/sumo/phase1_1.yaml"
+
+  raw_dir: "data/raw/training_data"
+  split_index_file: "data/splits/split_index.json"
+  metadata_file: "data/splits/metadata.json"
+  constant_mainline_demand_vph: 1500
+
+  n_query_points: 512
+
+  control_augmentation:
+    include_full_control: true
+    padded_samples_per_rollout:
+      train: 16
+      val: 0
+      test: 0
+    min_prefix_steps: 1
+    max_prefix_steps:
+    seed: 42
+
+model:
+  branch_input_dim: "auto"
+  trunk_input_dim: 2
+  hidden_dim: 128
+  latent_dim: 128
+
+training:
+  seed: 42
+  device: "auto"
+  n_epochs: 5
+  batch_size: 16
+  eval_batch_size: 16
+  num_workers: 0
+  lr: 0.001
+  weight_decay: 0.000001
+  grad_clip_norm: 1.0
+  eval_every: 1
+
+output:
+  base_dir: "runs/surrogate"
+  run_name: "deeponet_smoke"
+  wandb:
+    enabled: false
+    project: "sumo-to-pde"
+    entity:
+    run_name: "surrogate"
