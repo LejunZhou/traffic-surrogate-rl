@@ -41,8 +41,9 @@ vehicle:
                                # and localised congestion can form at the merge point.
 
 detectors:
-  n_detectors: 20
+  n_detectors: 18
   spacing_m: 100.0
+  start_position_m: 200.0
   vehicle_length_m: 5.0       # used for occupancy-to-density fallback
 
 output:

@@ -22,8 +22,8 @@ splits:
   test_frac: 0.15
 
 output:
-  raw_dir: "data/raw"
+  raw_dir: "data/raw/training_data"
   splits_dir: "data/splits"
-  network_dir: "data/raw/network"
+  network_dir: "data/raw/training_data/network"
   save_heatmaps: true
   heatmap_every_n: 10

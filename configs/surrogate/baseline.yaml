@@ -2,19 +2,38 @@
 # Learns ramp_control(t) -> density(x, t) under constant mainline inflow.
 
 data:
-  raw_dir: "data/raw"
+  # Source of truth for road geometry, detector grid, simulation horizon,
+  # control interval, and default constant demand used for filtering samples.
+  sumo_config: "configs/sumo/phase1_1.yaml"
+
+  raw_dir: "data/raw/training_data"
   split_index_file: "data/splits/split_index.json"
   metadata_file: "data/splits/metadata.json"
-  constant_mainline_demand_vph: 1500
-  highway_length_m: 2000.0
-  duration_s: 3600.0
+  # null means: use demand.mainline_demand_vph from data.sumo_config.
+  constant_mainline_demand_vph:
 
   # Random query points per rollout during training.
-  # Validation/test use the full 20 x 120 grid.
+  # Validation/test use the full N_x x T_ctrl grid.
   n_query_points: 512
 
+  # RL uses partial action histories: [u_0, ..., u_k, 0, ..., 0].
+  # These settings keep the original non-padded rollout and add padded-prefix
+  # training views from the same SUMO trajectory without rerunning SUMO.
+  control_augmentation:
+    include_full_control: true
+    padded_samples_per_rollout:
+      train: 16
+      val: 0
+      test: 0
+    min_prefix_steps: 1
+    # null means T_ctrl - 1, so every padded view has at least one unknown
+    # future control entry set to zero.
+    max_prefix_steps:
+    seed: 42
+
 model:
-  branch_input_dim: 120
+  # auto means: simulation.duration_s / simulation.dt_ctrl_s from data.sumo_config.
+  branch_input_dim: "auto"
   trunk_input_dim: 2
   hidden_dim: 128
   latent_dim: 128
@@ -38,4 +57,4 @@ output:
     enabled: true
     project: "sumo-to-pde"
     entity:
-    run_name:
+    run_name: "surrogate"

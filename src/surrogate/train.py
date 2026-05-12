@@ -15,6 +15,7 @@ so prior results are never overwritten.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import random
 import sys
@@ -32,10 +33,117 @@ from utils.config import load_config
 from utils.logging import ExperimentLogger, make_run_dir
 
 
+def apply_sumo_config_defaults(config: dict) -> dict:
+    """Resolve surrogate config values from data.sumo_config when present.
+
+    The SUMO config is the source of truth for geometry and rollout timing.
+    This keeps DeepONet training aligned with the exact scenario used to
+    generate SUMO trajectories.
+    """
+    cfg = copy.deepcopy(config)
+    project_root = Path(cfg.get("project_root", Path.cwd())).resolve()
+    data_cfg = cfg.setdefault("data", {})
+    sumo_config_path = data_cfg.get("sumo_config")
+
+    if sumo_config_path:
+        sumo_cfg = load_config(str(_resolve_path(sumo_config_path, project_root)))
+        net_cfg = sumo_cfg["network"]
+        sim_cfg = sumo_cfg["simulation"]
+        det_cfg = sumo_cfg["detectors"]
+        demand_cfg = sumo_cfg["demand"]
+
+        data_cfg.setdefault("highway_length_m", float(net_cfg["highway_length_m"]))
+        data_cfg.setdefault("duration_s", float(sim_cfg["duration_s"]))
+        data_cfg.setdefault("dt_ctrl_s", float(sim_cfg["dt_ctrl_s"]))
+        data_cfg.setdefault("n_detectors", int(det_cfg["n_detectors"]))
+        if data_cfg.get("constant_mainline_demand_vph") is None:
+            data_cfg["constant_mainline_demand_vph"] = float(
+                demand_cfg["mainline_demand_vph"]
+            )
+
+    model_cfg = cfg.setdefault("model", {})
+    if model_cfg.get("branch_input_dim", "auto") == "auto":
+        model_cfg["branch_input_dim"] = resolve_branch_input_dim(cfg)
+
+    return cfg
+
+
+def resolve_branch_input_dim(config: dict) -> int:
+    """Return DeepONet branch input length T_ctrl."""
+    model_cfg = config.get("model", {})
+    value = model_cfg.get("branch_input_dim", 120)
+    if value != "auto":
+        return int(value)
+
+    data_cfg = config.get("data", {})
+    if "duration_s" not in data_cfg or "dt_ctrl_s" not in data_cfg:
+        raise KeyError(
+            "model.branch_input_dim='auto' requires data.duration_s and data.dt_ctrl_s. "
+            "Set data.sumo_config or provide those fields explicitly."
+        )
+    return int(float(data_cfg["duration_s"]) / float(data_cfg["dt_ctrl_s"]))
+
+
+def _resolve_path(path: str | Path, project_root: Path) -> Path:
+    p = Path(path)
+    if p.is_absolute():
+        return p
+    return project_root / p
+
+
+def _dataset_augmentation_kwargs(data_cfg: dict, split_name: str) -> dict:
+    aug_cfg = data_cfg.get("control_augmentation", {})
+    if not aug_cfg:
+        return {}
+
+    padded_samples = _split_config_value(
+        aug_cfg.get(
+            "padded_samples_per_rollout",
+            aug_cfg.get("padded_control_samples_per_rollout", 0),
+        ),
+        split_name,
+        0,
+    )
+    include_full = _split_config_value(
+        aug_cfg.get("include_full_control", True),
+        split_name,
+        True,
+    )
+
+    return {
+        "include_full_control": _as_bool(include_full),
+        "padded_control_samples_per_rollout": padded_samples,
+        "padded_control_min_prefix_steps": int(
+            aug_cfg.get(
+                "min_prefix_steps",
+                aug_cfg.get("padded_control_min_prefix_steps", 1),
+            )
+        ),
+        "padded_control_max_prefix_steps": aug_cfg.get(
+            "max_prefix_steps", aug_cfg.get("padded_control_max_prefix_steps")
+        ),
+        "padded_control_seed": int(
+            aug_cfg.get("seed", aug_cfg.get("padded_control_seed", 0))
+        ),
+    }
+
+
+def _split_config_value(value, split_name: str, default):
+    if isinstance(value, dict):
+        return value.get(split_name, default)
+    return value
+
+
+def _as_bool(value) -> bool:
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 def _build_model(config: dict) -> DeepONet:
     model_cfg = config["model"]
     branch = BranchNet(
-        input_dim=int(model_cfg.get("branch_input_dim", 120)),
+        input_dim=resolve_branch_input_dim(config),
         hidden_dim=int(model_cfg.get("hidden_dim", 128)),
         output_dim=int(model_cfg.get("latent_dim", 128)),
     )
@@ -65,6 +173,7 @@ def train(config: dict) -> None:
             training (lr, batch_size, n_epochs, seed),
             output.run_dir
     """
+    config = apply_sumo_config_defaults(config)
     training_cfg = config["training"]
     data_cfg = config["data"]
     output_cfg = config["output"]
@@ -107,6 +216,7 @@ def train(config: dict) -> None:
         constant_mainline_demand_vph=constant_demand,
         highway_length_m=float(data_cfg.get("highway_length_m", 2000.0)),
         duration_s=float(data_cfg.get("duration_s", 3600.0)),
+        **_dataset_augmentation_kwargs(data_cfg, "train"),
     )
     val_ds = TrafficDataset(
         split_file=split_index_file,
@@ -119,6 +229,7 @@ def train(config: dict) -> None:
         constant_mainline_demand_vph=constant_demand,
         highway_length_m=float(data_cfg.get("highway_length_m", 2000.0)),
         duration_s=float(data_cfg.get("duration_s", 3600.0)),
+        **_dataset_augmentation_kwargs(data_cfg, "val"),
     )
 
     train_loader = DataLoader(
@@ -156,7 +267,15 @@ def train(config: dict) -> None:
 
     print(f"[train_surrogate] Run dir: {run_dir}")
     print(f"[train_surrogate] Device : {device}")
-    print(f"[train_surrogate] Samples: train={len(train_ds)}, val={len(val_ds)}")
+    print(
+        "[train_surrogate] Samples: "
+        f"train={len(train_ds)} "
+        f"(full={train_ds.n_full_control_views}, "
+        f"padded={train_ds.n_padded_control_views}), "
+        f"val={len(val_ds)} "
+        f"(full={val_ds.n_full_control_views}, "
+        f"padded={val_ds.n_padded_control_views})"
+    )
     print(
         "[train_surrogate] Density stats: "
         f"mean={stats['mean_density']:.4f}, std={stats['std_density']:.4f}"
@@ -246,6 +365,7 @@ def main() -> None:
         sys.path.insert(0, str(project_root / "src"))
 
     cfg = load_config(str(project_root / args.config))
+    cfg["project_root"] = str(project_root)
     train(cfg)
 
 

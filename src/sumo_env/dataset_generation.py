@@ -1,14 +1,17 @@
 """
-Generate the training dataset by sweeping over demand levels and control signals.
+Generate base SUMO rollouts by sweeping over demand levels and control signals.
 
 Milestone 2 MVP: constant demand levels only (1000, 1500, 2000 veh/hr).
-Time-varying demand profiles and truncated/zero-padded variants are deferred to 2b.
+Time-varying demand profiles are deferred to 2b. Truncated/zero-padded
+control views are generated later by surrogate.datasets.TrafficDataset so the
+same physical rollout can supervise both full-control and RL-style partial
+control inputs without rerunning SUMO.
 
 For each simulation:
 1. Pick a demand level from the configured set
 2. Sample a ramp control signal from the 4-type family
 3. Run SUMO via run_simulation()
-4. Save the result as data/raw/sim_{index:04d}.npz
+4. Save the result under output.raw_dir as sim_{index:04d}.npz
 
 Dataset schema (per sample .npz):
     density:             (N_x, T_ctrl)     veh/km — supervised target
@@ -185,6 +188,8 @@ def generate_dataset(
     out = ds_config["output"]
     n_samples: int = ds["n_samples"]
     seed: int = ds["random_seed"]
+    start_index: int = int(ds.get("start_index", 0))
+    overwrite: bool = bool(ds.get("overwrite", False))
     demand_levels: list[float] = ds["demand_levels"]
     control_types: list[str] = ds["ramp_control_types"]
     save_heatmaps: bool = out.get("save_heatmaps", False)
@@ -222,11 +227,18 @@ def generate_dataset(
     saved_paths: list[Path] = []
     total_teleports = 0
 
-    print(f"[dataset] Generating {n_samples} samples ...")
+    if start_index > 0:
+        _advance_control_rng(rng, control_types, T_ctrl, start_index)
+
+    print(
+        f"[dataset] Generating {n_samples} samples "
+        f"(indices {start_index:04d}..{start_index + n_samples - 1:04d}) ..."
+    )
     for i in range(n_samples):
+        sample_index = start_index + i
         # Round-robin demand levels, random control type
-        demand_vph = demand_levels[i % len(demand_levels)]
-        control_type = control_types[i % len(control_types)]
+        demand_vph = demand_levels[sample_index % len(demand_levels)]
+        control_type = control_types[sample_index % len(control_types)]
 
         ramp_control = sample_ramp_control(control_type, T_ctrl, rng)
 
@@ -235,7 +247,7 @@ def generate_dataset(
             base_sumo_config,
             {
                 "demand": {"mainline_demand_vph": demand_vph},
-                "simulation": {"seed": seed + i},
+                "simulation": {"seed": seed + sample_index},
             },
         )
 
@@ -251,7 +263,13 @@ def generate_dataset(
         total_teleports += teleports
 
         # Save .npz
-        traj_path = raw_dir / f"sim_{i:04d}.npz"
+        traj_path = raw_dir / f"sim_{sample_index:04d}.npz"
+        if traj_path.exists() and not overwrite:
+            raise FileExistsError(
+                f"{traj_path} already exists. Use --append to continue after "
+                "existing files, --start-index to choose a different index, "
+                "or --overwrite to replace existing files."
+            )
         np.savez(
             str(traj_path),
             density=result["density"],
@@ -271,14 +289,14 @@ def generate_dataset(
 
         # Optional heatmap
         if save_heatmaps and i % heatmap_every_n == 0:
-            plot_path = raw_dir / f"sim_{i:04d}_density.png"
+            plot_path = raw_dir / f"sim_{sample_index:04d}_density.png"
             plot_trajectory(
                 density=result["density"],
                 x_grid=result["x_grid"],
                 t_grid=result["t_grid"],
                 output_path=plot_path,
                 title=(
-                    f"sim_{i:04d} — {int(demand_vph)} vph, "
+                    f"sim_{sample_index:04d} — {int(demand_vph)} vph, "
                     f"{control_type}, seed={sim_config['simulation']['seed']}"
                 ),
             )
@@ -299,6 +317,29 @@ def generate_dataset(
         print("[dataset] All simulations had 0 teleports.")
 
     return saved_paths
+
+
+def next_sample_index(raw_dir: str | Path) -> int:
+    """Return one plus the largest sim_*.npz index in raw_dir."""
+    raw_path = Path(raw_dir)
+    max_index = -1
+    for path in raw_path.glob("sim_*.npz"):
+        suffix = path.stem.removeprefix("sim_")
+        if suffix.isdigit():
+            max_index = max(max_index, int(suffix))
+    return max_index + 1
+
+
+def _advance_control_rng(
+    rng: np.random.Generator,
+    control_types: list[str],
+    T_ctrl: int,
+    n_steps: int,
+) -> None:
+    """Advance control RNG so appended runs match one contiguous generation."""
+    for i in range(n_steps):
+        control_type = control_types[i % len(control_types)]
+        sample_ramp_control(control_type, T_ctrl, rng)
 
 
 # ── Train/val/test splits ────────────────────────────────────────────────────
@@ -426,9 +467,30 @@ if __name__ == "__main__":
         "--n-samples",
         type=int,
         default=None,
-        help="Override n_samples from config (for smoke tests)",
+        help="Override n_samples from config",
+    )
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help=(
+            "Start at one plus the largest existing sim_*.npz index in "
+            "the configured output.raw_dir."
+        ),
+    )
+    parser.add_argument(
+        "--start-index",
+        type=int,
+        default=None,
+        help="Start writing at this sample index, for example 120.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow replacing existing sim_*.npz files.",
     )
     args = parser.parse_args()
+    if args.append and args.start_index is not None:
+        parser.error("Use either --append or --start-index, not both.")
 
     config_path = str(_PROJECT_ROOT / args.config)
     ds_cfg = load_config(config_path)
@@ -436,6 +498,13 @@ if __name__ == "__main__":
     # Allow CLI override of n_samples for quick smoke tests
     if args.n_samples is not None:
         ds_cfg["dataset"]["n_samples"] = args.n_samples
+    if args.append:
+        raw_dir = _PROJECT_ROOT / ds_cfg["output"]["raw_dir"]
+        ds_cfg["dataset"]["start_index"] = next_sample_index(raw_dir)
+    elif args.start_index is not None:
+        ds_cfg["dataset"]["start_index"] = args.start_index
+    if args.overwrite:
+        ds_cfg["dataset"]["overwrite"] = True
 
     # Write back the potentially modified config for generate_dataset
     import tempfile

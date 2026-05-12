@@ -154,7 +154,7 @@ These metrics differ from the earlier Milestone 1.1 table above because the conf
 - **Constant mainline demand only**: 1000, 1500, 2000 veh/hr
 - **Ramp control families**: constant, piecewise_constant, smooth, ramp_step (equally weighted)
 - Time-varying demand (mild_peak) is deferred to Milestone 2b (requires route-generation changes)
-- Truncated/zero-padded variants are deferred to Milestone 2b (post-processing; value unclear until RL transfer is tested)
+- Truncated/zero-padded variants are generated as surrogate-dataset views from the base SUMO rollouts
 - Surrogate target: density only (speed/flow saved for diagnostics)
 
 ### Smoke-test setting
@@ -190,7 +190,7 @@ cd src && python -m sumo_env.dataset_generation \
 To override sample count for quick tests, add `--n-samples 12`.
 
 ### Conclusion
-Milestone 2 MVP pipeline is implemented and smoke-tested. Full dataset generation (n=120) and DeepONet surrogate training (Milestone 3) are the next steps. Time-varying demand profiles and truncation/zero-padding variants are deferred follow-up work (Milestone 2b).
+Milestone 2 MVP pipeline is implemented and smoke-tested. Full dataset generation (n=120) and DeepONet surrogate training (Milestone 3) are the next steps. Time-varying demand profiles remain deferred follow-up work (Milestone 2b).
 
 ## Coding rules
 - Python 3.11
@@ -333,7 +333,7 @@ Training data contains fully-specified control signals. During RL rollout, parti
 
 Phase 1 dataset design requirement:
 To support the zero-padded rollout formulation, the training dataset MUST include truncated/zero-padded control variants:
-- For each full simulation trajectory, generate additional training samples by truncating the control signal at random cut points k ∈ {1, ..., T_ctrl-1} and zero-padding the remainder
+- For each full simulation trajectory, generate additional surrogate-dataset views by truncating the control signal at random cut points k ∈ {1, ..., T_ctrl-1} and zero-padding the remainder
 - Query points for truncated samples should be restricted to t ≤ t_k (only the valid portion)
 - This is not optional — it is a core requirement for the surrogate to generalize to RL rollout conditions
 

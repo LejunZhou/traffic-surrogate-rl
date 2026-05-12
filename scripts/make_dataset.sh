@@ -5,7 +5,7 @@
 #   bash scripts/make_dataset.sh configs/experiments/phase1.yaml
 #
 # Reads all dataset parameters from the config file.
-# Outputs raw simulation files to data/raw/ and splits to data/splits/.
+# Outputs raw simulation files to the config's output.raw_dir and splits to data/splits/.
 
 set -euo pipefail
 

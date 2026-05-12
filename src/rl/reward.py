@@ -19,8 +19,6 @@ from __future__ import annotations
 
 import numpy as np
 
-# TODO: implement reward function
-
 
 def compute_reward(density: np.ndarray) -> float:
     """Compute the Phase 1 baseline reward from a density snapshot.
@@ -32,4 +30,11 @@ def compute_reward(density: np.ndarray) -> float:
     Returns:
         Scalar reward = -(mean density).
     """
-    raise NotImplementedError
+    density_arr = np.asarray(density, dtype=np.float32)
+    if density_arr.ndim != 1:
+        raise ValueError(f"density must be a 1D array, got shape {density_arr.shape}")
+    if density_arr.size == 0:
+        raise ValueError("density must contain at least one detector value")
+    if not np.all(np.isfinite(density_arr)):
+        raise ValueError("density contains NaN or Inf values")
+    return -float(np.mean(density_arr))

@@ -4,6 +4,8 @@ Evaluation of a trained DeepONet surrogate.
 Produces:
 - Per-sample L2 error and relative L2 error on the test split
 - Predicted-vs-true density heatmaps (x vs t) for a selection of test samples
+- Per-plotted-sample .npz files containing true density, predicted density,
+  prediction error, x/t grids, and input ramp control u
 - Summary metrics saved to eval_metrics.json in the run directory
 """
 
@@ -20,6 +22,7 @@ from torch.utils.data import DataLoader
 
 from surrogate.datasets import TrafficDataset
 from surrogate.deeponet import BranchNet, DeepONet, TrunkNet
+from surrogate.train import apply_sumo_config_defaults, resolve_branch_input_dim
 from utils.config import load_config
 from utils.plotting import plot_density_heatmap
 
@@ -28,7 +31,7 @@ def _build_model(config: dict) -> DeepONet:
     model_cfg = config["model"]
     return DeepONet(
         BranchNet(
-            input_dim=int(model_cfg.get("branch_input_dim", 120)),
+            input_dim=resolve_branch_input_dim(config),
             hidden_dim=int(model_cfg.get("hidden_dim", 128)),
             output_dim=int(model_cfg.get("latent_dim", 128)),
         ),
@@ -51,8 +54,9 @@ def evaluate(checkpoint_path: str, config: dict) -> dict:
         Dict of scalar metrics: {"mean_l2": ..., "rel_l2": ..., ...}
     """
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    model_config = checkpoint.get("config", config)
-    data_cfg = config.get("data", model_config["data"])
+    model_config = apply_sumo_config_defaults(checkpoint.get("config", config))
+    eval_config = apply_sumo_config_defaults(config) if config else {}
+    data_cfg = eval_config.get("data", model_config["data"])
     eval_cfg = config.get("evaluation", {})
     output_dir = Path(eval_cfg.get("output_dir", Path(checkpoint_path).parent / "eval"))
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -118,12 +122,23 @@ def evaluate(checkpoint_path: str, config: dict) -> dict:
                     break
                 sample = dataset.samples[sample_idx]
                 density_shape = sample["density"].shape
+                predicted_density = pred[batch_idx].reshape(density_shape)
+                true_density = true[batch_idx].reshape(density_shape)
                 plot_density_heatmap(
-                    predicted=pred[batch_idx].reshape(density_shape),
-                    true=true[batch_idx].reshape(density_shape),
+                    predicted=predicted_density,
+                    true=true_density,
                     x_grid=sample["x_grid"],
                     t_grid=sample["t_grid"],
                     output_path=output_dir / f"sample_{sample_idx:03d}.png",
+                )
+                np.savez(
+                    output_dir / f"sample_{sample_idx:03d}.npz",
+                    predicted_density=predicted_density.astype(np.float32),
+                    true_density=true_density.astype(np.float32),
+                    density_error=(predicted_density - true_density).astype(np.float32),
+                    ramp_control=sample["ramp_control"].astype(np.float32),
+                    x_grid=sample["x_grid"].astype(np.float32),
+                    t_grid=sample["t_grid"].astype(np.float32),
                 )
             sample_offset += pred.shape[0]
 
@@ -151,6 +166,8 @@ def main() -> None:
         sys.path.insert(0, str(project_root / "src"))
 
     cfg = load_config(str(project_root / args.config)) if args.config else {}
+    if cfg:
+        cfg["project_root"] = str(project_root)
     evaluate(str(project_root / args.checkpoint), cfg)
 
 

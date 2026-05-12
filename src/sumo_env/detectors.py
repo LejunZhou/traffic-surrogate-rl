@@ -2,12 +2,16 @@
 Place E1 (induction loop) detectors along the mainline highway and
 provide helpers for reading them via TraCI.
 
-Detector layout (Phase 1, N_x=20, spacing=100 m):
-  Detectors 00–04 : edge "highway_pre"  at pos  50, 150, 250, 350, 450 m
-  Detectors 05–19 : edge "highway_post" at pos  50, 150, …, 1450 m
+Detector layout (Phase 1, spacing=100 m, start_position_m=200 m):
+  Detectors are placed at absolute positions 200, 300, ..., 1900 m
+  for the default 2000 m highway.
 
 Absolute positions from the upstream boundary (x_grid):
-  50, 150, 250, …, 1950 m  (100 m spacing, 20 values)
+  start_position_m + i * spacing_m.
+
+If network.acceleration_lane_length_m is set, detectors whose absolute
+position falls between the merge and the lane drop are placed on edge
+"highway_accel", which has one extra lane for ramp acceleration.
 
 Detectors are read online via TraCI (getLastStepVehicleNumber,
 getLastStepMeanSpeed, getLastStepOccupancy); the XML output file
@@ -42,42 +46,21 @@ def build_detector_file(output_path: str, config: dict) -> str:
     sim_cfg = config["simulation"]
     net_cfg = config["network"]
 
-    n: int = det_cfg["n_detectors"]            # 20
-    spacing: float = det_cfg["spacing_m"]      # 100.0
+    n: int = det_cfg["n_detectors"]
     freq: int = sim_cfg["dt_ctrl_s"]           # 30
-    ramp_pos: float = net_cfg["ramp_position_m"]  # 500.0
-
-    num_lanes: int = net_cfg.get("num_lanes", 1)
-
-    n_pre = int(ramp_pos / spacing)            # 5  (on highway_pre)
-    n_post = n - n_pre                         # 15 (on highway_post)
-
     # SUMO requires a file attribute even when we read via TraCI.
     det_out = Path(output_path).parent / "det_output.xml"
 
     lines = ['<?xml version="1.0" encoding="UTF-8"?>', "<additional>"]
 
-    for i in range(n_pre):
-        pos = (i + 0.5) * spacing
-        for lane in range(num_lanes):
-            det_id = f"det_{i:02d}" if num_lanes == 1 else f"det_{i:02d}_L{lane}"
+    for i in range(n):
+        edge_id, edge_pos, lane_count = _detector_edge_at_index(config, i)
+        for lane in range(lane_count):
+            det_id = _detector_id(i, lane_count, lane)
             lines.append(
                 f'    <inductionLoop id="{det_id}" '
-                f'lane="highway_pre_{lane}" '
-                f'pos="{pos:.1f}" '
-                f'freq="{freq}" '
-                f'file="{det_out}"/>'
-            )
-
-    for i in range(n_post):
-        pos = (i + 0.5) * spacing
-        idx = n_pre + i
-        for lane in range(num_lanes):
-            det_id = f"det_{idx:02d}" if num_lanes == 1 else f"det_{idx:02d}_L{lane}"
-            lines.append(
-                f'    <inductionLoop id="{det_id}" '
-                f'lane="highway_post_{lane}" '
-                f'pos="{pos:.1f}" '
+                f'lane="{edge_id}_{lane}" '
+                f'pos="{edge_pos:.1f}" '
                 f'freq="{freq}" '
                 f'file="{det_out}"/>'
             )
@@ -116,12 +99,11 @@ def get_detector_ids_per_lane(config: dict) -> list[list[str]]:
         Multi-lane:  [["det_00_L0", "det_00_L1"], ["det_01_L0", "det_01_L1"], …]
     """
     n: int = config["detectors"]["n_detectors"]
-    num_lanes: int = config.get("network", {}).get("num_lanes", 1)
-
-    if num_lanes == 1:
-        return [[f"det_{i:02d}"] for i in range(n)]
-
-    return [[f"det_{i:02d}_L{lane}" for lane in range(num_lanes)] for i in range(n)]
+    result: list[list[str]] = []
+    for i in range(n):
+        _, _, lane_count = _detector_edge_at_index(config, i)
+        result.append([_detector_id(i, lane_count, lane) for lane in range(lane_count)])
+    return result
 
 
 def get_x_grid(config: dict) -> np.ndarray:
@@ -131,11 +113,9 @@ def get_x_grid(config: dict) -> np.ndarray:
         config: Full experiment config dict.
 
     Returns:
-        shape (N_x,) float32 array: [50., 150., …, 1950.]
+        shape (N_x,) float32 array of detector absolute positions.
     """
-    n: int = config["detectors"]["n_detectors"]
-    spacing: float = config["detectors"]["spacing_m"]
-    return np.array([(i + 0.5) * spacing for i in range(n)], dtype=np.float32)
+    return np.array(_detector_positions(config), dtype=np.float32)
 
 
 def parse_detector_output(output_xml: str, config: dict) -> dict:
@@ -154,3 +134,51 @@ def parse_detector_output(output_xml: str, config: dict) -> dict:
         "parse_detector_output is reserved for offline XML parsing (Milestone 2+). "
         "Phase 1 reads detectors online via TraCI in run_simulation.py."
     )
+
+
+def _detector_id(index: int, lane_count: int, lane: int) -> str:
+    return f"det_{index:02d}" if lane_count == 1 else f"det_{index:02d}_L{lane}"
+
+
+def _detector_edge_at_index(config: dict, index: int) -> tuple[str, float, int]:
+    """Return edge id, edge-local detector position, and lane count."""
+    x_abs = _detector_positions(config)[index]
+    return _detector_edge_at_position(config, x_abs)
+
+
+def _detector_positions(config: dict) -> list[float]:
+    det_cfg = config["detectors"]
+    net_cfg = config["network"]
+
+    n = int(det_cfg["n_detectors"])
+    spacing = float(det_cfg["spacing_m"])
+    start = float(det_cfg.get("start_position_m", 2.0 * spacing))
+    highway_length = float(net_cfg["highway_length_m"])
+    positions = [start + i * spacing for i in range(n)]
+    if positions and positions[-1] >= highway_length:
+        raise ValueError(
+            "Detector grid extends beyond the highway. "
+            f"Last detector position is {positions[-1]:.1f} m, "
+            f"but highway_length_m is {highway_length:.1f} m. "
+            "Reduce detectors.n_detectors or detectors.start_position_m."
+        )
+    return positions
+
+
+def _detector_edge_at_position(config: dict, x_abs: float) -> tuple[str, float, int]:
+    net_cfg = config["network"]
+
+    ramp_pos = float(net_cfg["ramp_position_m"])
+    num_lanes = int(net_cfg.get("num_lanes", 1))
+    accel_len = float(net_cfg.get("acceleration_lane_length_m", 0.0))
+
+    if x_abs < ramp_pos:
+        return "highway_pre", x_abs, num_lanes
+
+    if accel_len > 0.0:
+        accel_end = ramp_pos + accel_len
+        if x_abs < accel_end:
+            return "highway_accel", x_abs - ramp_pos, num_lanes + 1
+        return "highway_post", x_abs - accel_end, num_lanes
+
+    return "highway_post", x_abs - ramp_pos, num_lanes

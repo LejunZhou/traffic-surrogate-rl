@@ -55,6 +55,7 @@ class ExperimentLogger:
         self.csv_file = self.csv_path.open("w", newline="")
         self.csv_writer: csv.DictWriter | None = None
         self.fieldnames: list[str] | None = None
+        self.rows: list[dict[str, float | int]] = []
         self.wandb_run = None
 
         if use_wandb:
@@ -78,7 +79,18 @@ class ExperimentLogger:
             self.fieldnames = list(row.keys())
             self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=self.fieldnames)
             self.csv_writer.writeheader()
-        self.csv_writer.writerow(row)
+
+        self.rows.append(row)
+        new_fields = [
+            field
+            for field in row
+            if self.fieldnames is not None and field not in self.fieldnames
+        ]
+        if new_fields:
+            self.fieldnames.extend(new_fields)
+            self._rewrite_csv()
+        else:
+            self.csv_writer.writerow(row)
         self.csv_file.flush()
 
         if self.wandb_run is not None:
@@ -92,3 +104,13 @@ class ExperimentLogger:
         if self.wandb_run is not None:
             self.wandb_run.finish()
         self.csv_file.close()
+
+    def _rewrite_csv(self) -> None:
+        """Rewrite metrics.csv when a later row introduces new metric columns."""
+        if self.fieldnames is None:
+            return
+        self.csv_file.seek(0)
+        self.csv_file.truncate(0)
+        self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=self.fieldnames)
+        self.csv_writer.writeheader()
+        self.csv_writer.writerows(self.rows)

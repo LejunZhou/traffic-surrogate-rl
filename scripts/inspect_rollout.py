@@ -2,8 +2,8 @@
 Inspect a saved simulation rollout (.npz) and print a compact summary.
 
 Usage (from project root):
-    python scripts/inspect_rollout.py data/raw/sim_0000.npz
-    python scripts/inspect_rollout.py data/raw/sim_0000.npz --full
+    python scripts/inspect_rollout.py data/raw/training_data/sim_0000.npz
+    python scripts/inspect_rollout.py data/raw/training_data/sim_0000.npz --full
 
 What this prints:
 1. Keys and array shapes stored in the .npz file.

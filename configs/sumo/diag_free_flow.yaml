@@ -37,8 +37,9 @@ vehicle:
   idm_tau_s: 1.5
 
 detectors:
-  n_detectors: 20
+  n_detectors: 18
   spacing_m: 100.0
+  start_position_m: 200.0
   vehicle_length_m: 5.0
 
 output:

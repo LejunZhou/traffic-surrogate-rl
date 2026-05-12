@@ -56,12 +56,19 @@ def build_network(output_dir: str, config: dict) -> dict[str, str]:
 
     nodes_path = od / "nodes.nod.xml"
     edges_path = od / "edges.edg.xml"
+    connections_path = od / "connections.con.xml"
     net_path = od / "net.net.xml"
     route_path = od / "routes.rou.xml"
 
     _write_nodes(nodes_path, config["network"])
     _write_edges(edges_path, config["network"])
-    _run_netconvert(nodes_path, edges_path, net_path)
+    connection_file = None
+    if _has_acceleration_lane(config["network"]):
+        _write_connections(connections_path, config["network"])
+        connection_file = connections_path
+    else:
+        connections_path.unlink(missing_ok=True)
+    _run_netconvert(nodes_path, edges_path, net_path, connection_file)
     _write_routes(route_path, config)
 
     return {
@@ -76,6 +83,7 @@ def _write_nodes(path: Path, net_cfg: dict) -> None:
     ramp_pos = net_cfg["ramp_position_m"]
     ramp_len = net_cfg["ramp_length_m"]
     hw_len = net_cfg["highway_length_m"]
+    accel_len = _acceleration_lane_length(net_cfg)
 
     # Place ramp_start at 30° approach angle so edge length ≈ ramp_len.
     angle = math.radians(30)
@@ -83,20 +91,30 @@ def _write_nodes(path: Path, net_cfg: dict) -> None:
     ry = -ramp_len * math.sin(angle)
 
     num_lanes = net_cfg.get("num_lanes", 1)
-    # For multi-lane mainline, use "zipper" at merge (cooperative merging)
-    # so ramp vehicles don't have to yield to all mainline lanes simultaneously.
-    # For single-lane, keep "priority" (original behavior).
-    merge_type = "zipper" if num_lanes > 1 else "priority"
+    has_accel = _has_acceleration_lane(net_cfg)
+    # With an acceleration lane, the ramp enters its own temporary lane at
+    # merge and the actual lane drop happens later at accel_end.
+    merge_type = "priority" if has_accel else ("zipper" if num_lanes > 1 else "priority")
+    accel_end_type = "zipper"
 
-    content = (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        "<nodes>\n"
-        '    <node id="upstream"   x="0.00"         y="0.00"       type="priority"/>\n'
-        f'    <node id="merge"      x="{ramp_pos:.2f}"    y="0.00"       type="{merge_type}"/>\n'
-        f'    <node id="downstream" x="{hw_len:.2f}"   y="0.00"       type="priority"/>\n'
-        f'    <node id="ramp_start" x="{rx:.2f}"   y="{ry:.2f}" type="priority"/>\n'
-        "</nodes>\n"
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        "<nodes>",
+        '    <node id="upstream"   x="0.00"         y="0.00"       type="priority"/>',
+        f'    <node id="merge"      x="{ramp_pos:.2f}"    y="0.00"       type="{merge_type}"/>',
+    ]
+    if has_accel:
+        lines.append(
+            f'    <node id="accel_end"  x="{ramp_pos + accel_len:.2f}"    y="0.00"       type="{accel_end_type}"/>'
+        )
+    lines.extend(
+        [
+            f'    <node id="downstream" x="{hw_len:.2f}"   y="0.00"       type="priority"/>',
+            f'    <node id="ramp_start" x="{rx:.2f}"   y="{ry:.2f}" type="priority"/>',
+            "</nodes>",
+        ]
     )
+    content = "\n".join(lines) + "\n"
     path.write_text(content)
 
 
@@ -104,19 +122,74 @@ def _write_edges(path: Path, net_cfg: dict) -> None:
     spd_main = net_cfg["speed_limit_mps"]
     spd_ramp = net_cfg["ramp_speed_limit_mps"]
     num_lanes = net_cfg.get("num_lanes", 1)
+    ramp_pos = net_cfg["ramp_position_m"]
+    hw_len = net_cfg["highway_length_m"]
+    accel_len = _acceleration_lane_length(net_cfg)
 
-    content = (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        "<edges>\n"
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        "<edges>",
         f'    <edge id="highway_pre"  from="upstream"   to="merge"      '
-        f'numLanes="{num_lanes}" speed="{spd_main:.2f}" priority="10"/>\n'
-        f'    <edge id="highway_post" from="merge"      to="downstream" '
-        f'numLanes="{num_lanes}" speed="{spd_main:.2f}" priority="10"/>\n'
-        f'    <edge id="ramp"         from="ramp_start" to="merge"      '
-        f'numLanes="1" speed="{spd_ramp:.2f}" priority="5"/>\n'
-        "</edges>\n"
+        f'numLanes="{num_lanes}" speed="{spd_main:.2f}" priority="10"/>',
+    ]
+    if _has_acceleration_lane(net_cfg):
+        lines.append(
+            f'    <edge id="highway_accel" from="merge"      to="accel_end"  '
+            f'numLanes="{num_lanes + 1}" speed="{spd_main:.2f}" priority="10"/>'
+        )
+        lines.append(
+            f'    <edge id="highway_post"  from="accel_end"  to="downstream" '
+            f'numLanes="{num_lanes}" speed="{spd_main:.2f}" priority="10"/>'
+        )
+    else:
+        lines.append(
+            f'    <edge id="highway_post" from="merge"      to="downstream" '
+            f'numLanes="{num_lanes}" speed="{spd_main:.2f}" priority="10"/>'
+        )
+    lines.extend(
+        [
+            f'    <edge id="ramp"         from="ramp_start" to="merge"      '
+            f'numLanes="1" speed="{spd_ramp:.2f}" priority="5"/>',
+            "</edges>",
+        ]
     )
+    if _has_acceleration_lane(net_cfg) and ramp_pos + accel_len >= hw_len:
+        raise ValueError(
+            "network.acceleration_lane_length_m must end before highway_length_m"
+        )
+    content = "\n".join(lines) + "\n"
     path.write_text(content)
+
+
+def _write_connections(path: Path, net_cfg: dict) -> None:
+    """Write explicit lane connections for an acceleration-lane network."""
+    num_lanes = net_cfg.get("num_lanes", 1)
+    lines = ['<?xml version="1.0" encoding="UTF-8"?>', "<connections>"]
+
+    # At the ramp merge, lane 0 of highway_accel is reserved for the ramp.
+    # Mainline lanes continue into lanes 1..N, avoiding an immediate conflict.
+    for lane in range(num_lanes):
+        lines.append(
+            f'    <connection from="highway_pre" to="highway_accel" '
+            f'fromLane="{lane}" toLane="{lane + 1}"/>'
+        )
+    lines.append(
+        '    <connection from="ramp" to="highway_accel" fromLane="0" toLane="0"/>'
+    )
+
+    # At the end of the acceleration lane, the added ramp lane drops into the
+    # rightmost mainline lane. Existing mainline lanes shift back down.
+    lines.append(
+        '    <connection from="highway_accel" to="highway_post" fromLane="0" toLane="0"/>'
+    )
+    for lane in range(num_lanes):
+        lines.append(
+            f'    <connection from="highway_accel" to="highway_post" '
+            f'fromLane="{lane + 1}" toLane="{lane}"/>'
+        )
+
+    lines.append("</connections>")
+    path.write_text("\n".join(lines) + "\n")
 
 
 def _find_netconvert() -> str:
@@ -159,7 +232,9 @@ def _find_netconvert() -> str:
     )
 
 
-def _run_netconvert(nodes: Path, edges: Path, output: Path) -> None:
+def _run_netconvert(
+    nodes: Path, edges: Path, output: Path, connections: Path | None = None
+) -> None:
     """Locate and run SUMO's netconvert tool to compile the network."""
     binary = _find_netconvert()
     cmd = [
@@ -170,6 +245,8 @@ def _run_netconvert(nodes: Path, edges: Path, output: Path) -> None:
         "--no-turnarounds",        # suppress U-turn connections
         "--no-warnings",
     ]
+    if connections is not None:
+        cmd.extend(["--connection-files", str(connections)])
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(
@@ -197,7 +274,13 @@ def _write_routes(path: Path, config: dict) -> None:
     vph = demand_cfg["mainline_demand_vph"]
     tau = veh_cfg.get("idm_tau_s", 1.0)   # default: SUMO built-in IDM default
     num_lanes = net_cfg.get("num_lanes", 1)
-    depart_lane = "best" if num_lanes > 1 else "0"
+    depart_lane = "random" if num_lanes > 1 else "0"
+    if _has_acceleration_lane(net_cfg):
+        main_edges = "highway_pre highway_accel highway_post"
+        ramp_edges = "ramp highway_accel highway_post"
+    else:
+        main_edges = "highway_pre highway_post"
+        ramp_edges = "ramp highway_post"
 
     content = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -216,8 +299,8 @@ def _write_routes(path: Path, config: dict) -> None:
         '           speedFactor="1.0"\n'
         '           speedDev="0.0"/>\n'
         '\n'
-        '    <route id="route_main" edges="highway_pre highway_post"/>\n'
-        '    <route id="route_ramp" edges="ramp highway_post"/>\n'
+        f'    <route id="route_main" edges="{main_edges}"/>\n'
+        f'    <route id="route_ramp" edges="{ramp_edges}"/>\n'
         '\n'
         '    <flow id="mainline_flow"\n'
         '          type="passenger"\n'
@@ -229,3 +312,11 @@ def _write_routes(path: Path, config: dict) -> None:
         "</routes>\n"
     )
     path.write_text(content)
+
+
+def _acceleration_lane_length(net_cfg: dict) -> float:
+    return float(net_cfg.get("acceleration_lane_length_m", 0.0))
+
+
+def _has_acceleration_lane(net_cfg: dict) -> bool:
+    return _acceleration_lane_length(net_cfg) > 0.0
