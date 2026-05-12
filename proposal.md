@@ -265,16 +265,16 @@ Analytical queue model (shared by both envs):
 - Same formula in `SurrogateEnv` and `SumoEnv` for parity: the surrogate-vs-SUMO comparison in M6/M7 reflects only the density-dynamics gap, not a reward-signal gap.
 - SUMO's measured queue length (`traci.edge.getLastStepVehicleNumber("ramp")`) is still recorded in the info dict for diagnostics but is not used as the reward signal.
 
-Reward (Phase 1 shaped):
+Reward (Phase 1 shaped, Milestone 5c):
 - Computed by a shared reward function `compute_reward(density, queue_length, weights)` in `src/rl/reward.py`, used identically by both surrogate and SUMO environments.
-- Formula: `reward = -alpha · mean(density) - beta · queue_length - gamma · std(density)` with `density` in physical units (veh/km).
-- Default weights: `alpha=1.0, beta=0.1, gamma=1.0`. Tunable per-experiment in the PPO config YAML.
+- Formula (nonlinear): `reward = -alpha · max(0, mean(density) - rho_freeflow) - beta · (queue_length / queue_norm)^2 - gamma · std(density)` with `density` in physical units (veh/km).
+- Default weights: `alpha=1.0, beta=1.0, gamma=1.0, rho_freeflow=20.0, queue_norm=100.0`. All five are tunable per-experiment in the PPO config YAML.
 - Term motivation:
-  - `-alpha · mean(density)`: penalizes mainline congestion (the original Phase-1 baseline).
-  - `-beta · queue_length`: penalizes the on-ramp queue, so closing the ramp entirely is no longer free.
-  - `-gamma · std(density)`: rewards spatially uniform density, discouraging local hotspots.
-- Empirical rationale: the original `alpha=1, beta=0, gamma=0` baseline converged to the degenerate `u≡0` policy because the reward had a corner solution at "close the ramp completely" (Milestone 5 finding, archived on `mvp-v1-old-scenario`). The queue term creates the counterbalance that makes the metering problem non-trivial.
-- Future reward extensions (Phase 2+): throughput bonus, total travel time penalty, fairness across vehicles. The current shaped reward is still intentionally simple; weights can be retuned without code changes.
+  - `-alpha · max(0, mean(density) - rho_freeflow)`: ReLU penalty on density excess. Operation below free-flow density (mainline not yet congested) costs nothing; the term only activates when mean density crosses `rho_freeflow`, which on the current scenario corresponds roughly to the u=1.0 corner.
+  - `-beta · (queue_length / queue_norm)^2`: quadratic penalty on queue. Cost grows fast as the queue builds, so long queues are heavily penalized while short queues are cheap. Replaces the linear queue term used in M5/M5b.
+  - `-gamma · std(density)`: rewards spatially uniform density, discouraging local hotspots. Unchanged from M5.
+- Empirical rationale: M5b's linear `-beta · queue_length` produced a structural corner trap at u=1.0 because the queue is identically 0 at that corner, making the term inactive regardless of beta. The ReLU-on-density + quadratic-on-queue shape breaks this by penalizing the u=1.0 corner specifically when its mean density crosses `rho_freeflow`, while still penalizing closer-to-closure policies non-linearly. See `_progress/milestone_5b_progress.md` §5b.5 for the linear-corner diagnostic and `_progress/milestone_5c_progress.md` for the M5c validation run.
+- Future reward extensions (Phase 2+): quadratic ReLU on density excess (sharper congestion penalty), piecewise queue with a hard "unacceptable" threshold, throughput bonus, total travel time penalty. The current shape is still intentionally simple; weights and the two thresholds (`rho_freeflow`, `queue_norm`) can be retuned without code changes.
 
 Episode structure:
 - Episode length: T_ctrl = 120 steps (one full simulation horizon = 3600 s)

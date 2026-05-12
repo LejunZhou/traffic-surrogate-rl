@@ -136,8 +136,12 @@ def test_random_rollout(env_and_checkpoint):
             assert step == env.T_ctrl - 1
             break
     assert len(rewards) == env.T_ctrl
-    # Mean reward magnitude should be roughly -(mean_density) + std + 0.1*queue.
-    assert -200.0 < float(np.mean(rewards)) < 0.0
+    # Under the M5c nonlinear reward, expected per-step magnitude is much
+    # smaller than the M5/M5b linear form: alpha-term ~ 0 (mean rho rarely
+    # crosses 20 under random actions), beta * (queue/100)^2 stays below
+    # ~16 for queue < 400, gamma * std is ~5. Total per-step well within
+    # (-50, 0). Tighter bound catches real regressions while staying safe.
+    assert -50.0 < float(np.mean(rewards)) < 0.0
 
 
 def test_check_env(env_and_checkpoint):

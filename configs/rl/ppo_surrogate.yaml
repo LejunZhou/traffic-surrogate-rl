@@ -13,9 +13,11 @@ env:
   queue_norm_scale: 100.0
   device: "cpu"
   reward:
-    alpha: 1.0   # weight on -mean(density)
-    beta: 0.1    # weight on -queue_length
-    gamma: 1.0   # weight on -std(density)
+    alpha: 1.0          # weight on -max(0, mean(rho) - rho_freeflow)
+    beta: 1.0           # weight on -(queue / queue_norm)^2
+    gamma: 1.0          # weight on -std(rho)
+    rho_freeflow: 20.0  # below this mean density, alpha-term is 0 (veh/km)
+    queue_norm: 100.0   # quadratic queue normalizer (vehicles)
 
 ppo:
   policy: "MlpPolicy"
