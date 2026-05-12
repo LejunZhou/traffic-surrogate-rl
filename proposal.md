@@ -55,7 +55,11 @@ Start simple. Do NOT add complexity unless explicitly requested.
 
 Phase 1:
 - deterministic setting
-- 2-lane mainline highway + single-lane on-ramp
+- 1-lane mainline highway + 100 m acceleration lane + single-lane on-ramp
+  (the design originally specified a 2-lane mainline + zipper merge in
+  Milestone 1.1, which worked but was superseded by a 1-lane + accel
+  lane geometry in the network refresh; both layouts produced 0
+  teleports at this demand)
 - one on-ramp
 - baseline DeepONet
 - baseline PPO
@@ -69,23 +73,37 @@ Phase 2 candidates:
 - more realistic traffic PDE priors
 - multi-ramp / multi-agent control
 
-## Phase 1 design decisions
+## Phase 1 design decisions (as built)
+
+The implemented scenario constants are pinned in
+`configs/sumo/phase1_1.yaml` and the demand override in
+`configs/experiments/dataset_constant_inflow.yaml`; those files are the
+canonical source of truth and the bullets below are a descriptive
+summary.
 
 Physical scenario:
 - Highway length: 2000 m
-- Lanes: 2
-- On-ramp position: 500 m from upstream boundary
+- Lanes: 1 (with 100 m acceleration lane downstream of the merge; this
+  replaces the original Milestone 1.1 "2-lane mainline + zipper merge"
+  layout)
+- On-ramp position: 1300 m from upstream boundary
 - On-ramp length: 200 m
 - Speed limit: 120 km/h (33.33 m/s)
 - Simulation duration: 3600 s (1 hour)
 - Control step interval: 30 s → T_ctrl = 120 steps
-- Detector spacing: 100 m → N_x = 20 detectors along the mainline
+- Detector spacing: 100 m starting at 100 m → N_x = 19 detectors along
+  the mainline at positions [100, 200, …, 1900] m
 
-Mainline demand:
-- Small controlled family of demand profiles, not a single fixed profile
-- Profiles: low constant (e.g. 1000 veh/hr), medium constant (1500), high constant (2000), mild peak (ramps from 1200 to 2200 and back)
-- At dataset generation time, each simulation samples one demand profile
-- At RL episode reset, one demand profile is sampled for the episode
+Mainline demand (built):
+- Single constant 1500 vph throughout every episode and across every
+  training run. Ramp demand cap fixed at 800 vph.
+- This is a simplification of the original Phase 1 plan, which called
+  for a "small controlled family" of demand profiles (low ≈ 1000 vph,
+  medium 1500, high 2000, mild peak ramping 1200 → 2200 → 1200) sampled
+  per episode. The family is **deferred to Milestone 2c** and requires
+  an M2 dataset rerun across demand levels plus a 240-dim DeepONet
+  branch input (concatenating `mainline_demand(t)` and
+  `ramp_control(t)`).
 
 Tooling:
 - DeepONet: pure PyTorch (no deepxde)
@@ -184,11 +202,26 @@ Preferred saved fields:
 
 Architecture: unstacked DeepONet with dot-product output.
 
-Branch net input:
+**Implementation status:** This section describes the multi-demand
+Phase 1 *design target*. The current Milestone 3 surrogate trains on a
+single constant 1500 vph dataset and uses a **120-dim branch input
+(ramp_control only)**, dropping the mainline_demand concatenation.
+Upgrading to the 240-dim form below is **Milestone 3b**, blocked on
+Milestone 2c building a multi-demand dataset.
+
+Branch net input (design target — M3b):
 - Concatenation of [ramp_control(t); mainline_demand(t)]
 - Shape: (2 * T_ctrl,) = (240,)
 - ramp_control values ∈ [0, 1] (metering rate)
 - mainline_demand values normalized (min-max across the demand family)
+
+Branch net input (currently implemented — M3):
+- ramp_control(t) only
+- Shape: (T_ctrl,) = (120,)
+- ramp_control values ∈ [0, 1]
+- Mainline demand is filtered to a single value (1500 vph) at dataset
+  load time via `data.constant_mainline_demand_vph` in
+  `configs/surrogate/baseline.yaml`
 
 Trunk net input:
 - Query coordinates (x, t), each normalized to [0, 1]

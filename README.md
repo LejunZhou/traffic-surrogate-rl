@@ -4,8 +4,8 @@ This repository implements a surrogate-accelerated reinforcement learning pipeli
 
 ## Pipeline
 
-1. Build a SUMO traffic simulation (2-lane highway + one on-ramp)
-2. Generate training data by sweeping over demand profiles and ramp metering signals
+1. Build a SUMO traffic simulation (1-lane mainline + 100 m acceleration lane + one on-ramp)
+2. Generate training data by sweeping over ramp metering signals at a fixed mainline demand
 3. Train a DeepONet surrogate to predict density trajectories from control inputs
 4. Wrap the surrogate as a Gymnasium environment for fast RL training
 5. Train PPO in both the surrogate environment and directly in SUMO
@@ -57,17 +57,18 @@ export SUMO_HOME="/Library/Frameworks/EclipseSUMO.framework/Versions/Current/Ecl
 export PYTHONPATH="$SUMO_HOME/share/sumo/tools:$PYTHONPATH"
 export PATH="$SUMO_HOME/bin:$PATH"
 
-# Run one rollout with the Phase 1.1 config (2-lane zipper merge)
+# Run one rollout with the current Phase 1 config (1-lane mainline + accel lane)
 python scripts/run_rollout.py \
   --config configs/sumo/phase1_1.yaml \
   --ramp-rate 0.5 \
   --output-index test
 ```
 
-## Phase 1 scope
+## Phase 1 scope (as built)
 
-- 2-lane highway, 2000 m, one on-ramp
+- 1-lane mainline + 100 m acceleration lane downstream of the on-ramp, 2000 m total, one on-ramp at 1300 m
 - DeepONet trained on density trajectories only (speed/flow logged for diagnostics)
-- PPO observation: density at 20 detectors + current demand + normalized time index (22 features)
-- Reward: negative mean density (Phase 1 baseline)
-- Demand family: low / medium / high constant + mild peak profile
+- PPO observation: density at 19 detectors + current demand + normalized time index + analytical queue (22 features)
+- Reward: shaped Phase 1 form — `-alpha · max(0, mean(rho) - rho_freeflow) - beta · (queue / queue_norm)^2 - gamma · std(rho)` (see `proposal.md` §"Reward (Phase 1 shaped)")
+- Mainline demand: single constant 1500 vph, ramp demand cap 800 vph
+- Multi-demand family training (low / medium / high constant + mild peak profile) is a deferred follow-up (Milestone 2c)
