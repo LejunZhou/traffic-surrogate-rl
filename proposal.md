@@ -95,8 +95,12 @@ Physical scenario:
   the mainline at positions [100, 200, …, 1900] m
 
 Mainline demand (built):
-- Single constant 1500 vph throughout every episode and across every
-  training run. Ramp demand cap fixed at 800 vph.
+- Single constant 2000 vph throughout every episode and across every
+  training run. Ramp demand cap fixed at 800 vph. (The M2 dataset was
+  originally generated at 1500 vph; commit `1672424` bumped it to
+  2000 vph to align with the scenario default in
+  `configs/sumo/phase1_1.yaml`. `configs/rl/ppo_sumo.yaml` was bumped
+  to match in a subsequent edit.)
 - This is a simplification of the original Phase 1 plan, which called
   for a "small controlled family" of demand profiles (low ≈ 1000 vph,
   medium 1500, high 2000, mild peak ramping 1200 → 2200 → 1200) sampled
@@ -241,7 +245,7 @@ Branch net input (currently implemented — M3):
 - ramp_control(t) only
 - Shape: (T_ctrl,) = (120,)
 - ramp_control values ∈ [0, 1]
-- Mainline demand is filtered to a single value (1500 vph) at dataset
+- Mainline demand is filtered to a single value (2000 vph) at dataset
   load time via `data.constant_mainline_demand_vph` in
   `configs/surrogate/baseline.yaml`
 
@@ -339,9 +343,49 @@ Reward (Phase 1 shaped, Milestone 5c):
 - Empirical rationale: M5b's linear `-beta · queue_length` produced a structural corner trap at u=1.0 because the queue is identically 0 at that corner, making the term inactive regardless of beta. The ReLU-on-density + quadratic-on-queue shape breaks this by penalizing the u=1.0 corner specifically when its mean density crosses `rho_freeflow`, while still penalizing closer-to-closure policies non-linearly. See `_progress/milestone_5b_progress.md` §5b.5 for the linear-corner diagnostic and `_progress/milestone_5c_progress.md` for the M5c validation run.
 - Future reward extensions (Phase 2+): quadratic ReLU on density excess (sharper congestion penalty), piecewise queue with a hard "unacceptable" threshold, throughput bonus, total travel time penalty. The current shape is still intentionally simple; weights and the two thresholds (`rho_freeflow`, `queue_norm`) can be retuned without code changes.
 
+PPO agent and training (Milestone 6 — current settings in `configs/rl/ppo_surrogate.yaml` and `configs/rl/ppo_sumo.yaml`; the two configs now mirror each other on all PPO fields, differing only on `env` and `training.total_timesteps`):
+
+Policy / value network architecture:
+- SB3 `MlpPolicy` with `policy_kwargs.net_arch = {pi: [512, 512, 512], vf: [512, 512, 512]}` and `activation_fn = tanh`
+- Both heads are 3-layer MLPs with 512 units per layer. This is a deliberate capacity bump over SB3's default `[64, 64]` to give the actor/critic enough representation for the 22-dim observation × 120-step horizon.
+- Action distribution: diagonal Gaussian; mean from the policy head, log-std as a trainable parameter (SB3 default).
+
+PPO hyperparameters (identical across surrogate and SUMO configs):
+- `n_steps = 120` — one rollout is exactly one episode (T_ctrl = 120)
+- `batch_size = 120` — one mini-batch per epoch
+- `n_epochs = 5` — five gradient updates per PPO update
+- `learning_rate = 1e-4` (Adam)
+- `gamma = 0.99`, `gae_lambda = 0.95`
+- `clip_range = 0.2`
+- `ent_coef = 0.01` — non-zero entropy bonus to discourage premature action-distribution collapse (the failure mode observed in M6b at 100k SUMO steps, where the policy shrank toward `u = 0`)
+- `vf_coef = 0.5`, `max_grad_norm = 0.5`
+
+Training-loss objective (SB3 minimizes):
+
+```text
+L_total   = L_policy + vf_coef · L_value − ent_coef · L_entropy
+
+L_policy  = -E[min( rt · At , clip(rt, 1−ε, 1+ε) · At )]      (clipped surrogate)
+L_value   = E[ (V_θ(s_t) − V_target,t)^2 ]                    (MSE on bootstrapped returns)
+L_entropy = E[ H(π_θ(·|s_t)) ]                                (Gaussian entropy bonus)
+```
+
+- `rt = π_θ(a_t|s_t) / π_θ_old(a_t|s_t)` — importance ratio against the rollout-time policy
+- `At` via GAE: `δ_t = r_t + γ · V(s_{t+1}) − V(s_t)`, `At = δ_t + (γλ) · δ_{t+1} + (γλ)² · δ_{t+2} + …`
+- `V_target,t = At + V(s_t)` — the bootstrapped return target
+- Advantages are normalized to mean = 0, std = 1 over the batch before `L_policy` is computed.
+
+Training budget:
+- Surrogate path: `total_timesteps = 2 × 10⁶` (~3 min per 100k steps on the M3 DeepONet).
+- SUMO path: `total_timesteps = 20 000` (~167 episodes; ~30–90 min wall clock at 10–30 s per SUMO episode). The M6b 100k SUMO stress test at a 5× higher budget collapsed to `u ≈ 0` (commit `da92d13`); raising this further is gated on first diagnosing that collapse with the entropy bonus + larger network now in place.
+
+W&B tracking (both configs ship with `output.wandb.enabled: true`, project `sumo-to-pde`):
+- SB3 logger streams `rollout/*`, `train/*`, `time/*` scalars (e.g. `rollout/ep_rew_mean`, `train/entropy_loss`, `train/approx_kl`, `train/clip_fraction`, `train/explained_variance`).
+- A custom `WandbInfoCallback` (`src/rl/train_ppo.py`) additionally logs `env/*` scalars from the env info dict every `training.wandb_info_log_freq` steps (default 1000): `env/ramp_rate`, `env/mean_density`, `env/queue_length`, `env/raw_reward`, `env/throughput_vph`, `env/teleports`, `env/insert_success`, etc. — useful for diagnosing reward-component imbalances during training.
+
 Episode structure:
 - Episode length: T_ctrl = 120 steps (one full simulation horizon = 3600 s)
-- At reset: sample a demand value from `env.demand_profiles` in the PPO config. The current MVP pins `demand_profiles: [1500.0]` (single-element list → degenerate sampling at 1500 vph every episode). The design target — sampling from a 4-element family of low / medium / high constant + mild peak profiles — is the Milestone 2c follow-up.
+- At reset: sample a demand value from `env.demand_levels` in the PPO config. The current MVP pins `demand_levels: [2000.0]` (single-element list → degenerate sampling at 2000 vph every episode). The design target — sampling from a 4-element family of low / medium / high constant + mild peak profiles — is the Milestone 2c follow-up.
 - No early termination in Phase 1
 
 Environment parity:

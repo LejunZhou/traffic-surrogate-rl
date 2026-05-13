@@ -72,7 +72,7 @@ python scripts/run_rollout.py \
 - DeepONet trained on density trajectories only (speed/flow logged for diagnostics)
 - PPO observation: density at 19 detectors + current demand + normalized time index + analytical queue (22 features)
 - Reward: shaped Phase 1 form — `-alpha · max(0, mean(rho) - rho_freeflow) - beta · (queue / queue_norm)^2 - gamma · std(rho)` (see `proposal.md` §"Reward (Phase 1 shaped)")
-- Mainline demand: single constant 1500 vph, ramp demand cap 800 vph
+- Mainline demand: single constant 2000 vph, ramp demand cap 800 vph
 - Multi-demand family training (low / medium / high constant + mild peak profile) is a deferred follow-up (Milestone 2c)
 
 ## Reward setup
