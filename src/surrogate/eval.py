@@ -60,6 +60,8 @@ def evaluate(checkpoint_path: str, config: dict) -> dict:
     eval_cfg = config.get("evaluation", {})
     output_dir = Path(eval_cfg.get("output_dir", Path(checkpoint_path).parent / "eval"))
     output_dir.mkdir(parents=True, exist_ok=True)
+    if _as_bool(eval_cfg.get("clean_output", True)):
+        _clean_eval_outputs(output_dir)
 
     normalization = checkpoint["normalization"]
     dataset = TrafficDataset(
@@ -100,6 +102,8 @@ def evaluate(checkpoint_path: str, config: dict) -> dict:
     mse_values = []
     full_mse_values = []
     padded_mse_values = []
+    min_predicted_density_values = []
+    min_unclipped_predicted_density_values = []
 
     sample_offset = 0
     max_plots = _resolve_max_plots(eval_cfg.get("max_plots", "all"), len(dataset))
@@ -111,10 +115,15 @@ def evaluate(checkpoint_path: str, config: dict) -> dict:
             target = target.to(device)
             pred_norm = model(branch_input, trunk_input)
 
-            pred = (
+            pred_unclipped = (
                 pred_norm.cpu().numpy() * normalization["std_density"]
                 + normalization["mean_density"]
             )
+            min_unclipped_predicted_density_values.append(
+                float(np.min(pred_unclipped))
+            )
+            pred = np.maximum(pred_unclipped, 0.0).astype(np.float32, copy=False)
+            min_predicted_density_values.append(float(np.min(pred)))
             true = (
                 target.cpu().numpy() * normalization["std_density"]
                 + normalization["mean_density"]
@@ -144,7 +153,10 @@ def evaluate(checkpoint_path: str, config: dict) -> dict:
                 sample = dataset.samples[sample_idx]
                 density_shape, t_grid, view_label = _view_metadata(sample, prefix_len)
                 ramp_control_input = branch_input[batch_idx].cpu().numpy()
-                predicted_density = pred[batch_idx].reshape(density_shape)
+                predicted_density = np.maximum(
+                    pred[batch_idx].reshape(density_shape),
+                    0.0,
+                )
                 true_density = true[batch_idx].reshape(density_shape)
                 output_stem = (
                     f"view_{view_idx:04d}_sample_{sample_idx:04d}_{view_label}"
@@ -176,6 +188,10 @@ def evaluate(checkpoint_path: str, config: dict) -> dict:
         "mean_mse_physical": float(np.mean(mse_values)),
         "mean_mse_physical_full": _mean_or_none(full_mse_values),
         "mean_mse_physical_padded": _mean_or_none(padded_mse_values),
+        "min_predicted_density": _min_or_none(min_predicted_density_values),
+        "min_unclipped_predicted_density": _min_or_none(
+            min_unclipped_predicted_density_values
+        ),
         "n_samples": len(dataset),
         "n_full_control_views": dataset.n_full_control_views,
         "n_padded_control_views": dataset.n_padded_control_views,
@@ -226,6 +242,19 @@ def _mean_or_none(values: list[float]) -> float | None:
     if not values:
         return None
     return float(np.mean(values))
+
+
+def _min_or_none(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return float(np.min(values))
+
+
+def _clean_eval_outputs(output_dir: Path) -> None:
+    for pattern in ("view_*.png", "view_*.npz", "eval_metrics.json"):
+        for path in output_dir.glob(pattern):
+            if path.is_file():
+                path.unlink()
 
 
 def _as_bool(value) -> bool:

@@ -106,6 +106,7 @@ def train(config: dict) -> None:
     try:
         env = Monitor(_make_env(env_type, env_cfg), filename=str(run_dir / "monitor.csv"))
         callbacks = []
+        total_timesteps = int(training_cfg["total_timesteps"])
         checkpoint_freq = int(training_cfg.get("checkpoint_freq", 0))
         if checkpoint_freq > 0:
             callbacks.append(
@@ -121,6 +122,14 @@ def train(config: dict) -> None:
         )
         if info_callback is not None:
             callbacks.append(info_callback)
+        entropy_callback = _make_entropy_coef_callback(
+            ppo_cfg,
+            total_timesteps=total_timesteps,
+            wandb_run=wandb_run,
+            log_freq=int(training_cfg.get("wandb_info_log_freq", 1)),
+        )
+        if entropy_callback is not None:
+            callbacks.append(entropy_callback)
 
         ppo_kwargs = _ppo_kwargs(ppo_cfg)
         model = PPO(
@@ -136,7 +145,6 @@ def train(config: dict) -> None:
             sb3_logger.output_formats.append(wandb_format)
         model.set_logger(sb3_logger)
 
-        total_timesteps = int(training_cfg["total_timesteps"])
         model.learn(
             total_timesteps=total_timesteps,
             callback=CallbackList(callbacks) if callbacks else None,
@@ -294,6 +302,86 @@ def _make_wandb_info_callback(wandb_run, log_freq: int):
             return True
 
     return WandbInfoCallback(log_freq)
+
+
+def _make_entropy_coef_callback(
+    ppo_cfg: dict,
+    *,
+    total_timesteps: int,
+    wandb_run,
+    log_freq: int,
+):
+    schedule_cfg = ppo_cfg.get("ent_coef_schedule") or {}
+    if not bool(schedule_cfg.get("enabled", False)):
+        return None
+
+    schedule_type = str(schedule_cfg.get("type", "exponential")).lower()
+    supported_schedules = {"linear", "exponential", "power"}
+    if schedule_type not in supported_schedules:
+        valid = ", ".join(sorted(supported_schedules))
+        raise ValueError(
+            "ppo.ent_coef_schedule.type must be one of "
+            f"{valid}; got {schedule_type!r}."
+        )
+
+    initial = float(schedule_cfg.get("initial", ppo_cfg.get("ent_coef", 0.0)))
+    final = float(schedule_cfg.get("final", initial))
+    if initial < 0.0 or final < 0.0:
+        raise ValueError("Entropy coefficients must be non-negative.")
+    if schedule_type == "exponential" and initial <= 0.0:
+        raise ValueError("Exponential entropy schedule requires initial > 0.")
+    if schedule_type == "exponential" and final <= 0.0:
+        raise ValueError("Exponential entropy schedule requires final > 0.")
+    power = float(schedule_cfg.get("power", 3.0))
+    if power <= 0.0:
+        raise ValueError("ppo.ent_coef_schedule.power must be positive.")
+    total_timesteps = max(int(total_timesteps), 1)
+    log_freq = max(int(log_freq), 1)
+
+    from stable_baselines3.common.callbacks import BaseCallback
+
+    class EntropyCoefScheduleCallback(BaseCallback):
+        def _on_training_start(self) -> None:
+            self._set_ent_coef(0)
+
+        def _on_step(self) -> bool:
+            self._set_ent_coef(self.num_timesteps)
+            return True
+
+        def _set_ent_coef(self, num_timesteps: int) -> None:
+            progress = min(max(float(num_timesteps) / total_timesteps, 0.0), 1.0)
+            ent_coef = _scheduled_entropy_coef(
+                progress=progress,
+                initial=initial,
+                final=final,
+                schedule_type=schedule_type,
+                power=power,
+            )
+            self.model.ent_coef = ent_coef
+            self.logger.record("train/ent_coef", ent_coef)
+            if wandb_run is not None and num_timesteps % log_freq == 0:
+                wandb_run.log({"train/ent_coef": ent_coef}, step=num_timesteps)
+
+    return EntropyCoefScheduleCallback()
+
+
+def _scheduled_entropy_coef(
+    *,
+    progress: float,
+    initial: float,
+    final: float,
+    schedule_type: str,
+    power: float,
+) -> float:
+    if schedule_type == "linear":
+        fraction_remaining = 1.0 - progress
+    elif schedule_type == "exponential":
+        return float(initial * ((final / initial) ** progress))
+    elif schedule_type == "power":
+        fraction_remaining = (1.0 - progress) ** power
+    else:
+        raise ValueError(f"Unsupported entropy schedule type: {schedule_type!r}")
+    return float(final + (initial - final) * fraction_remaining)
 
 
 def _info_scalars(info: dict) -> dict[str, float]:

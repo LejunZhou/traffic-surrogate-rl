@@ -121,5 +121,5 @@ def compute_reward(
     return -(
         w.alpha * density_excess
         + w.beta * q_scaled * q_scaled
-        + w.gamma * std_density
+        + w.gamma * std_density/67.7167 #std of the surrogate training data
     )

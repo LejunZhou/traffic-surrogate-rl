@@ -42,10 +42,13 @@ bash scripts/make_dataset.sh configs/experiments/phase1.yaml
 # 2. Train surrogate
 bash scripts/train_surrogate.sh configs/surrogate/baseline.yaml
 
-# 3. Train PPO in surrogate environment
+# 3. Evaluate surrogate model
+PYTHONPATH=src python -m surrogate.eval --help
+
+# 4. Train PPO in surrogate environment
 bash scripts/train_ppo_surrogate.sh configs/rl/ppo_surrogate.yaml
 
-# 4. Evaluate in SUMO
+# 5. Evaluate in SUMO
 bash scripts/eval_in_sumo.sh configs/rl/ppo_surrogate.yaml runs/rl/<run_name>/final_model.zip
 ```
 

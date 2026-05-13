@@ -483,15 +483,16 @@ class SurrogateEnv(gym.Env):
         }
 
     def _clip_density(self, density: np.ndarray) -> np.ndarray:
-        clip_min = self.env_config.get("density_clip_min")
+        clip_min_raw = self.env_config.get("density_clip_min", 0.0)
+        clip_min = max(float(clip_min_raw), 0.0) if clip_min_raw is not None else 0.0
         clip_max = self.env_config.get("density_clip_max")
-        if clip_min is None and clip_max is None:
-            return density
-        return np.clip(
-            density,
-            -np.inf if clip_min is None else float(clip_min),
-            np.inf if clip_max is None else float(clip_max),
-        )
+        if clip_min == 0.0 and clip_max is None:
+            return np.maximum(density, 0.0)
+        if clip_max is None:
+            return np.maximum(density, clip_min)
+        if float(clip_max) < clip_min:
+            raise ValueError("density_clip_max must be greater than density_clip_min.")
+        return np.clip(density, clip_min, float(clip_max))
 
     def _load_sumo_config(self, env_config: dict, model_config: dict) -> dict:
         if "sumo" in env_config:

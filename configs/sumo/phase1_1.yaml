@@ -22,7 +22,7 @@ simulation:
 demand:
   mainline_demand_vph: 2000   # medium-constant profile (CLAUDE.md original)
   ramp_demand_vph: 800        # maximum ramp inflow (metering rate scales this)
-  demand_profile: "medium_constant"
+  demand_profile: "constant"
 
 vehicle:
   idm_tau_s: 1.0              # IDM headway time (SUMO default, CLAUDE.md original)

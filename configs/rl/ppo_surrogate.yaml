@@ -22,11 +22,11 @@ env:
   queue_norm_scale: 100.0
 
   reward:
-    alpha: 1.0
+    alpha: 0.0
     beta: 1.0
     gamma: 1.0
     rho_freeflow: 20.0
-    queue_norm: 100.0
+    queue_norm: 200.0
     # Set >0 to ignore reward during initial traffic development.
     warmup_s: 0
 
@@ -44,7 +44,11 @@ ppo:
   gamma: 0.99
   gae_lambda: 0.95
   clip_range: 0.2
-  ent_coef: 0.01
+  ent_coef: 0.05
+  ent_coef_schedule:
+    enabled: true
+    type: "exponential"
+    final: 0.0001
   vf_coef: 0.5
   max_grad_norm: 0.5
   device: "auto"
@@ -52,7 +56,7 @@ ppo:
 
 training:
   seed: 42
-  total_timesteps: 2000000
+  total_timesteps: 1000000
   checkpoint_freq: 100000
   progress_bar: false
   wandb_info_log_freq: 1000
