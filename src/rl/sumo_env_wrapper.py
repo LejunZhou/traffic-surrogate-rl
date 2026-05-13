@@ -5,10 +5,15 @@ This is the direct SUMO+RL path: the policy chooses one ramp-metering action
 per control interval, SUMO advances for that interval, and detector aggregates
 become the next observation. It does not use the surrogate model.
 
-Observation (shape (N_x + 2,) = (22,) for the Phase 1 configs):
+Ramp demand is tracked as a virtual unmet-demand queue. The metering action
+controls release attempts from that queue into SUMO; physical ramp-edge
+occupancy is reported separately.
+
+Observation (shape (N_x + 3,); 22 features for N_x=19):
     density[0:N_x]  — z-score normalized density at detector locations
     demand[N_x]     — min-max normalized current mainline demand in [0, 1]
     time[N_x+1]     — normalized control index k / T_ctrl in [0, 1]
+    queue[N_x+2]    — virtual ramp queue length normalized by queue_scale
 
 Action (shape (1,)):
     ramp metering rate in [0, 1] (continuous Box)
@@ -66,7 +71,8 @@ class SumoEnv(gym.Env):
         if not np.isclose(self.dt_ctrl_steps * self.step_len, self.dt_ctrl):
             raise ValueError("dt_ctrl_s must be an integer multiple of step_length_s")
 
-        self.T_ctrl = int(sim_cfg["duration_s"] / self.dt_ctrl)
+        self.duration_s = float(sim_cfg["duration_s"])
+        self.T_ctrl = int(self.duration_s / self.dt_ctrl)
         self.warmup_s = float(sim_cfg.get("ramp_warmup_s", 0.0))
         self.base_seed = int(sim_cfg.get("seed", self.env_config.get("seed", 42)))
         self.sumo_binary = str(self.env_config.get("sumo_binary", sim_cfg["sumo_binary"]))
@@ -86,16 +92,47 @@ class SumoEnv(gym.Env):
 
         self.density_mean = float(self.env_config.get("density_mean", 0.0))
         self.density_std = max(float(self.env_config.get("density_std", 1.0)), 1e-6)
+        reward_cfg = self.env_config.get("reward", {}) or {}
+        self.reward_weights = RewardWeights.from_config(reward_cfg)
+        queue_cfg = self.env_config.get("queue", {}) or {}
+        self.queue_scale = float(
+            self.env_config.get(
+                "queue_scale",
+                self.env_config.get(
+                    "queue_norm_scale",
+                    queue_cfg.get(
+                        "scale",
+                        reward_cfg.get(
+                            "queue_scale",
+                            reward_cfg.get(
+                                "queue_norm",
+                                max(
+                                    self.ramp_demand_vph
+                                    * self.duration_s
+                                    / 3600.0,
+                                    1.0,
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        )
+        if not np.isfinite(self.queue_scale):
+            raise ValueError("queue_scale must be finite.")
+        if self.queue_scale <= 0.0:
+            raise ValueError("queue_scale must be positive.")
 
-        # Shaped reward (Phase 1): -alpha*mean(density) -beta*queue -gamma*std(density).
-        # See proposal.md §"Reward (Phase 1 shaped)" for term motivation and
-        # the analytical queue model shared with SurrogateEnv.
-        self._reward_weights = RewardWeights.from_config(
-            self.env_config.get("reward")
+        self.reward_warmup_s = float(
+            self.env_config.get(
+                "reward_warmup_s",
+                reward_cfg.get("warmup_s", 0.0),
+            )
         )
-        self.queue_norm_scale = max(
-            float(self.env_config.get("queue_norm_scale", 100.0)), 1e-6
-        )
+        if not np.isfinite(self.reward_warmup_s):
+            raise ValueError("reward_warmup_s must be finite.")
+        if self.reward_warmup_s < 0.0:
+            raise ValueError("reward_warmup_s must be non-negative.")
 
         self.det_ids_per_lane = get_detector_ids_per_lane(self.sumo_config)
         self.x_grid = get_x_grid(self.sumo_config)
@@ -133,16 +170,18 @@ class SumoEnv(gym.Env):
         self.k = 0
         self.current_demand_vph = float(self.demand_levels[0])
         self.current_density = np.zeros(self.N_x, dtype=np.float32)
-        self._analytical_queue = 0.0
         self._started = False
         self._veh_counter = 0
-        self._frac_accumulator = 0.0
+        self._ramp_arrival_accumulator = 0.0
+        self._ramp_release_accumulator = 0.0
+        self._virtual_queue_length = 0.0
         self._insert_attempts = 0
         self._insert_success = 0
         self._insert_rejected = 0
         self._teleports = 0
         self._arrived_vehicles = 0
-        self._queue_samples: list[int] = []
+        self._queue_samples: list[float] = []
+        self._physical_ramp_samples: list[int] = []
 
     def reset(
         self, *, seed: int | None = None, options: dict | None = None
@@ -150,7 +189,7 @@ class SumoEnv(gym.Env):
         """Start a new SUMO simulation with a sampled demand profile.
 
         Returns:
-            observation: shape (N_x + 2,) = (22,)
+            observation: shape (N_x + 3,)
             info: dict
         """
         super().reset(seed=seed)
@@ -195,15 +234,17 @@ class SumoEnv(gym.Env):
         self.episode_index += 1
         self.k = 0
         self.current_density = np.zeros(self.N_x, dtype=np.float32)
-        self._analytical_queue = 0.0
         self._veh_counter = 0
-        self._frac_accumulator = 0.0
+        self._ramp_arrival_accumulator = 0.0
+        self._ramp_release_accumulator = 0.0
+        self._virtual_queue_length = 0.0
         self._insert_attempts = 0
         self._insert_success = 0
         self._insert_rejected = 0
         self._teleports = 0
         self._arrived_vehicles = 0
         self._queue_samples = []
+        self._physical_ramp_samples = []
 
         obs = self._make_observation()
         info = {
@@ -222,7 +263,7 @@ class SumoEnv(gym.Env):
             action: shape (1,), ramp metering rate ∈ [0, 1]
 
         Returns:
-            observation: shape (N_x + 2,)
+            observation: shape (N_x + 3,)
             reward: float
             terminated: bool
             truncated: bool
@@ -234,16 +275,15 @@ class SumoEnv(gym.Env):
         ramp_rate = float(np.clip(np.asarray(action, dtype=np.float32).reshape(-1)[0], 0.0, 1.0))
         density, speed, flow, interval_info = self._advance_control_interval(ramp_rate)
         self.current_density = density
-
-        # Analytical queue update (mirrors SurrogateEnv for env parity; SUMO's
-        # measured queue is still in interval_info / info for diagnostics).
-        queue_growth = (1.0 - ramp_rate) * self.ramp_demand_vph * self.dt_ctrl / 3600.0
-        self._analytical_queue = max(0.0, self._analytical_queue + queue_growth)
-        reward = compute_reward(
+        queue_length = float(interval_info.get("interval_queue_mean", 0.0))
+        reward_terms = self._reward_terms(density, queue_length)
+        raw_reward = compute_reward(
             density,
-            queue_length=self._analytical_queue,
-            weights=self._reward_weights,
+            queue_length=queue_length,
+            weights=self.reward_weights,
         )
+        reward_warmup_active = self._reward_warmup_active()
+        reward = 0.0 if reward_warmup_active else raw_reward
 
         self.k += 1
         terminated = self.k >= self.T_ctrl
@@ -256,12 +296,27 @@ class SumoEnv(gym.Env):
             "density": density.copy(),
             "speed": speed.copy(),
             "flow": flow.copy(),
-            "mean_density": float(np.mean(density)),
-            "std_density": float(np.std(density)),
+            "mean_density": reward_terms["mean_density"],
+            "std_density": reward_terms["std_density"],
+            "density_excess": reward_terms["density_excess"],
+            "density_excess_penalty": reward_terms["density_excess_penalty"],
             "mean_speed": float(np.mean(speed)),
             "mean_flow": float(np.mean(flow)),
+            "queue_length": queue_length,
+            "analytical_queue": queue_length,
+            "queue_penalty": reward_terms["queue_penalty"],
+            "queue_scale": float(self.queue_scale),
+            "queue_norm": self._normalize_queue(queue_length),
+            "std_penalty": reward_terms["std_penalty"],
+            "reward_alpha": float(self.reward_weights.alpha),
+            "reward_beta": float(self.reward_weights.beta),
+            "reward_gamma": float(self.reward_weights.gamma),
+            "reward_rho_freeflow": float(self.reward_weights.rho_freeflow),
+            "reward_queue_norm": float(self.reward_weights.queue_norm),
+            "raw_reward": float(raw_reward),
+            "reward_warmup_active": float(reward_warmup_active),
+            "reward_warmup_s": float(self.reward_warmup_s),
             "demand_vph": self.current_demand_vph,
-            "analytical_queue": self._analytical_queue,
             "arrived_vehicles": self._arrived_vehicles,
             "throughput_vph": self._throughput_vph(),
             "insert_attempts": self._insert_attempts,
@@ -290,21 +345,33 @@ class SumoEnv(gym.Env):
         sum_speed = np.zeros(self.N_x, dtype=np.float64)
         speed_count = np.zeros(self.N_x, dtype=np.int32)
         sum_occ = np.zeros(self.N_x, dtype=np.float64)
-        interval_queue: list[int] = []
+        interval_queue: list[float] = []
+        interval_physical_ramp: list[int] = []
         interval_teleports = 0
         interval_insert_attempts = 0
         interval_insert_success = 0
         interval_insert_rejected = 0
         interval_arrived = 0
-
-        insert_rate = ramp_rate * self.ramp_demand_vph / 3600.0
+        interval_ramp_arrivals = 0
+        interval_release_capacity = 0
 
         for _ in range(self.dt_ctrl_steps):
             if traci.simulation.getTime() >= self.warmup_s:
-                self._frac_accumulator += insert_rate * self.step_len
-                n_insert = int(self._frac_accumulator)
-                self._frac_accumulator -= n_insert
-                for _ in range(n_insert):
+                arrival_rate = self.ramp_demand_vph / 3600.0
+                self._ramp_arrival_accumulator += arrival_rate * self.step_len
+                n_arrivals = int(self._ramp_arrival_accumulator)
+                self._ramp_arrival_accumulator -= n_arrivals
+                self._virtual_queue_length += n_arrivals
+                interval_ramp_arrivals += n_arrivals
+
+                release_rate = ramp_rate * self.ramp_demand_vph / 3600.0
+                self._ramp_release_accumulator += release_rate * self.step_len
+                n_release_capacity = int(self._ramp_release_accumulator)
+                self._ramp_release_accumulator -= n_release_capacity
+                interval_release_capacity += n_release_capacity
+
+                n_release = min(n_release_capacity, int(self._virtual_queue_length))
+                for _ in range(n_release):
                     self._insert_attempts += 1
                     interval_insert_attempts += 1
                     try:
@@ -320,10 +387,16 @@ class SumoEnv(gym.Env):
                         self._veh_counter += 1
                         self._insert_success += 1
                         interval_insert_success += 1
+                        self._virtual_queue_length = max(
+                            self._virtual_queue_length - 1.0,
+                            0.0,
+                        )
                     except traci.exceptions.TraCIException:
                         self._insert_rejected += 1
                         interval_insert_rejected += 1
 
+            self._queue_samples.append(float(self._virtual_queue_length))
+            interval_queue.append(float(self._virtual_queue_length))
             traci.simulationStep()
 
             teleports = int(traci.simulation.getStartingTeleportNumber())
@@ -333,9 +406,9 @@ class SumoEnv(gym.Env):
             interval_teleports += teleports
             interval_arrived += arrived
 
-            queue_len = int(traci.edge.getLastStepVehicleNumber("ramp"))
-            self._queue_samples.append(queue_len)
-            interval_queue.append(queue_len)
+            physical_ramp_occupancy = int(traci.edge.getLastStepVehicleNumber("ramp"))
+            self._physical_ramp_samples.append(physical_ramp_occupancy)
+            interval_physical_ramp.append(physical_ramp_occupancy)
 
             for j, lane_ids in enumerate(self.det_ids_per_lane):
                 for det_id in lane_ids:
@@ -374,10 +447,18 @@ class SumoEnv(gym.Env):
             "interval_insert_attempts": interval_insert_attempts,
             "interval_insert_success": interval_insert_success,
             "interval_insert_rejected": interval_insert_rejected,
+            "ramp_arrivals": interval_ramp_arrivals,
+            "ramp_released": interval_insert_success,
+            "ramp_release_capacity": interval_release_capacity,
+            "queue_after": float(self._virtual_queue_length),
             "interval_queue_mean": float(np.mean(interval_queue)) if interval_queue else 0.0,
-            "interval_queue_max": int(max(interval_queue)) if interval_queue else 0,
+            "interval_queue_max": float(max(interval_queue)) if interval_queue else 0.0,
             "episode_queue_mean": float(np.mean(self._queue_samples)) if self._queue_samples else 0.0,
-            "episode_queue_max": int(max(self._queue_samples)) if self._queue_samples else 0,
+            "episode_queue_max": float(max(self._queue_samples)) if self._queue_samples else 0.0,
+            "interval_physical_ramp_mean": float(np.mean(interval_physical_ramp)) if interval_physical_ramp else 0.0,
+            "interval_physical_ramp_max": int(max(interval_physical_ramp)) if interval_physical_ramp else 0,
+            "episode_physical_ramp_mean": float(np.mean(self._physical_ramp_samples)) if self._physical_ramp_samples else 0.0,
+            "episode_physical_ramp_max": int(max(self._physical_ramp_samples)) if self._physical_ramp_samples else 0,
         }
         return density, speed, flow, info
 
@@ -385,7 +466,7 @@ class SumoEnv(gym.Env):
         density_norm = (self.current_density - self.density_mean) / self.density_std
         demand_norm = self._normalize_demand(self.current_demand_vph)
         time_norm = float(min(self.k, self.T_ctrl) / max(self.T_ctrl, 1))
-        queue_norm = float(self._analytical_queue / self.queue_norm_scale)
+        queue_norm = self._normalize_queue(self._virtual_queue_length)
         return np.concatenate(
             [
                 density_norm.astype(np.float32),
@@ -399,9 +480,30 @@ class SumoEnv(gym.Env):
             return 0.0
         return float((demand_vph - self.min_demand) / span)
 
+    def _normalize_queue(self, queue_length: float) -> float:
+        return float(max(queue_length, 0.0) / self.queue_scale)
+
+    def _reward_terms(self, density: np.ndarray, queue_length: float) -> dict[str, float]:
+        w = self.reward_weights
+        mean_density = float(np.mean(density))
+        std_density = float(np.std(density))
+        density_excess = max(0.0, mean_density - w.rho_freeflow)
+        queue_scaled = float(queue_length) / max(w.queue_norm, 1e-6)
+        return {
+            "mean_density": mean_density,
+            "std_density": std_density,
+            "density_excess": density_excess,
+            "density_excess_penalty": float(w.alpha * density_excess),
+            "queue_penalty": float(w.beta * queue_scaled * queue_scaled),
+            "std_penalty": float(w.gamma * std_density),
+        }
+
     def _throughput_vph(self) -> float:
         elapsed_s = max(float(self.k * self.dt_ctrl), self.dt_ctrl)
         return float(self._arrived_vehicles / elapsed_s * 3600.0)
+
+    def _reward_warmup_active(self) -> bool:
+        return float(self.k * self.dt_ctrl) < self.reward_warmup_s
 
     def _route_for_demand(self, demand_vph: float) -> str:
         key = float(demand_vph)

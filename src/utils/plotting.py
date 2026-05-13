@@ -4,6 +4,7 @@ Plotting utilities for surrogate evaluation and RL training analysis.
 Functions:
 - plot_trajectory:    single-trajectory density heatmap (x vs t) — Milestone 1
 - plot_density_heatmap: predicted-vs-true density heatmap (x vs t) — Milestone 3+
+- plot_control_sequence: ramp-metering action sequence over time
 - plot_reward_curve: PPO training reward over environment steps
 - plot_comparison_bar: comparison bar chart across policies and metrics
 """
@@ -85,6 +86,12 @@ def plot_density_heatmap(
     fig, axes = plt.subplots(1, 3, figsize=(14, 4), constrained_layout=True)
     t_min, t_max = float(t_grid[0]), float(t_grid[-1])
     x_min, x_max = float(x_grid[0]), float(x_grid[-1])
+    if np.isclose(t_min, t_max):
+        t_min -= 0.5
+        t_max += 0.5
+    if np.isclose(x_min, x_max):
+        x_min -= 0.5
+        x_max += 0.5
     extent = [t_min, t_max, x_min, x_max]
 
     im0 = axes[0].imshow(
@@ -130,6 +137,41 @@ def plot_density_heatmap(
     axes[2].set_xlabel("Time [s]")
     fig.colorbar(im2, ax=axes[2], label="Pred - true")
 
+    fig.savefig(str(output_path), dpi=150)
+    plt.close(fig)
+
+
+def plot_control_sequence(
+    actions: np.ndarray,
+    t_grid: np.ndarray,
+    output_path: str | Path,
+    title: str = "Ramp metering control",
+) -> None:
+    """Plot the ramp-metering action sequence over time.
+
+    Args:
+        actions: shape (T_ctrl,) ramp metering rates in [0, 1].
+        t_grid: shape (T_ctrl,) time points in seconds.
+        output_path: Save location for the plot (.png).
+        title: Plot title string.
+    """
+    actions_arr = np.asarray(actions, dtype=np.float32).reshape(-1)
+    t_arr = np.asarray(t_grid, dtype=np.float32).reshape(-1)
+    if actions_arr.shape != t_arr.shape:
+        raise ValueError(
+            "actions and t_grid must have the same shape, got "
+            f"{actions_arr.shape} and {t_arr.shape}"
+        )
+
+    fig, ax = plt.subplots(figsize=(10, 3))
+    ax.step(t_arr, actions_arr, where="post", linewidth=1.8)
+    ax.set_xlabel("Time [s]", fontsize=11)
+    ax.set_ylabel("Ramp rate", fontsize=11)
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_title(title, fontsize=12)
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
     fig.savefig(str(output_path), dpi=150)
     plt.close(fig)
 

@@ -9,11 +9,8 @@ data:
   raw_dir: "data/raw/training_data"
   split_index_file: "data/splits/split_index.json"
   metadata_file: "data/splits/metadata.json"
-  # The M2 dataset was generated with dataset_constant_inflow.yaml's
-  # demand_levels: [1500], which overrides phase1_1.yaml's 2000 vph
-  # default. Pin the filter explicitly so apply_sumo_config_defaults
-  # doesn't auto-fill 2000 (which would match zero samples).
-  constant_mainline_demand_vph: 1500
+  # DeepONet branch input does not include demand, so train/eval on one demand.
+  constant_mainline_demand_vph: 2000
 
   # Random query points per rollout during training.
   # Validation/test use the full N_x x T_ctrl grid.
@@ -38,8 +35,8 @@ model:
   # auto means: simulation.duration_s / simulation.dt_ctrl_s from data.sumo_config.
   branch_input_dim: "auto"
   trunk_input_dim: 2
-  hidden_dim: 128
-  latent_dim: 128
+  hidden_dim: 512
+  latent_dim: 512
 
 training:
   seed: 42
@@ -53,11 +50,22 @@ training:
   grad_clip_norm: 1.0
   eval_every: 10
 
+evaluation:
+  batch_size: 8
+  # "all" saves one PNG and one NPZ for every eval view.
+  max_plots: 30
+  # Add RL-style padded-prefix eval views in addition to full-control views.
+  padded_samples_per_rollout: 4
+  include_full_control: true
+  min_prefix_steps: 1
+  max_prefix_steps:
+  seed: 123
+
 output:
   base_dir: "runs/surrogate"
   run_name: "deeponet_constant_inflow"
   wandb:
-    enabled: false
+    enabled: true
     project: "sumo-to-pde"
     entity:
     run_name: "surrogate"

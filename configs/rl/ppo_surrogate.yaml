@@ -17,10 +17,17 @@ env:
   # from feeding the reward/observation.
   density_clip_min: 0.0
 
+  # Observation-side queue normalization. Keep this aligned with the SUMO PPO
+  # config so transferred policies see the same queue feature scale.
+  queue_norm_scale: 100.0
+
   reward:
-    queue_penalty_weight: 0.01
-    queue_scale: 800
-    # Ignore reward for the first 10 control intervals while traffic develops.
+    alpha: 1.0
+    beta: 1.0
+    gamma: 1.0
+    rho_freeflow: 20.0
+    queue_norm: 100.0
+    # Set >0 to ignore reward during initial traffic development.
     warmup_s: 0
 
 ppo:
@@ -52,13 +59,13 @@ training:
 
 evaluation:
   # Override this with `--policy runs/rl/<run_dir>/final_model.zip`.
-  policy_path: runs/rl/ppo_surrogate_20260512_020145/final_model.zip
-  n_episodes: 2
+  policy_path: runs/rl/<run_folder>/final_model.zip
+  n_episodes: 1
   deterministic: true
-  seed: 1000
+  seed: 888
   output_dir: "runs/rl_eval/surrogate_policy"
   save_plots: true
-  max_plot_episodes: 2
+  max_plot_episodes: 1
 
 output:
   base_dir: "runs/rl"

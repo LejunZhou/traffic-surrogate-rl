@@ -2,99 +2,66 @@
 Gymnasium environment backed by the trained DeepONet surrogate.
 
 At each step, the agent provides a ramp metering action; the surrogate
-predicts the resulting density field; the shaped reward (mean density +
-queue + density std) is computed and returned. Designed to expose the
-same observation / action / reward contract as SumoEnv so PPO training
-code is environment-agnostic.
+predicts the resulting density field; the reward is computed and returned.
 
-Observation (shape (N_x + 3,)):
-    density[0:N_x]  — z-score normalized density at the detector grid
+Observation (shape (N_x + 3,); 22 features for N_x=19):
+    density[0:N_x]  — z-score normalized density at detector locations
     demand[N_x]     — min-max normalized current mainline demand ∈ [0, 1]
-                      (0.0 when min == max, matching SumoEnv)
     time[N_x+1]     — normalized time index k / T_ctrl ∈ [0, 1]
-    queue[N_x+2]    — analytical on-ramp queue / queue_norm_scale
+    queue[N_x+2]    — virtual ramp queue length normalized by queue_scale
 
 Action (shape (1,)):
     ramp metering rate ∈ [0, 1] (continuous Box)
 
+Virtual ramp queue:
+    The surrogate predicts mainline density only, so ramp queue length is
+    tracked analytically from ramp demand and metering actions:
+    q_next = max(q_prev + arrivals - released, 0).
+    Queue length is reported in info, included in the observation, and
+    penalized in the reward.
+
 Surrogate rollout strategy (zero-padded partial control sequences):
-    At step k, branch input = [u(0),...,u(k), 0,...,0].
-    Trunk queries density at (x_i, t_k) for each detector i.
+    At step k, branch input = [u(0),...,u(k), 0,...,0]
+    Trunk queries density at all (x_i, t_k).
     DeepONet is re-evaluated from scratch each step (not autoregressive).
 
-See proposal.md §"Surrogate rollout strategy" and §"Analytical queue
-model" for the contract and motivation.
+The current baseline DeepONet uses ramp_control only as its branch input.
+Demand is still exposed in the observation for interface parity with SumoEnv,
+but single-demand checkpoints are the intended Phase 1 surrogate setting.
 """
 
 from __future__ import annotations
 
+import copy
+import warnings
 from pathlib import Path
 
-import gymnasium as gym
 import numpy as np
-import torch
+import gymnasium as gym
 from gymnasium import spaces
+import torch
 
 from rl.reward import RewardWeights, compute_reward
+from sumo_env.detectors import get_x_grid
 from surrogate.deeponet import BranchNet, DeepONet, TrunkNet
-from utils.config import load_config
+from surrogate.train import apply_sumo_config_defaults, resolve_branch_input_dim
+from utils.config import load_config, merge_configs
 
 
-def _build_model_from_checkpoint(checkpoint: dict) -> DeepONet:
-    """Reconstruct the DeepONet architecture from a saved checkpoint."""
-    ckpt_config = checkpoint["config"]
-    model_cfg = ckpt_config["model"]
-
-    branch_dim = model_cfg.get("branch_input_dim", 120)
-    if branch_dim == "auto":
-        data_cfg = ckpt_config.get("data", {})
-        duration_s = float(data_cfg.get("duration_s", 3600.0))
-        dt_ctrl_s = float(data_cfg.get("dt_ctrl_s", 30.0))
-        branch_dim = int(duration_s / dt_ctrl_s)
-    branch = BranchNet(
-        input_dim=int(branch_dim),
-        hidden_dim=int(model_cfg.get("hidden_dim", 128)),
-        output_dim=int(model_cfg.get("latent_dim", 128)),
+def _build_model(config: dict) -> DeepONet:
+    model_cfg = config["model"]
+    return DeepONet(
+        BranchNet(
+            input_dim=resolve_branch_input_dim(config),
+            hidden_dim=int(model_cfg.get("hidden_dim", 128)),
+            output_dim=int(model_cfg.get("latent_dim", 128)),
+        ),
+        TrunkNet(
+            input_dim=int(model_cfg.get("trunk_input_dim", 2)),
+            hidden_dim=int(model_cfg.get("hidden_dim", 128)),
+            output_dim=int(model_cfg.get("latent_dim", 128)),
+        ),
     )
-    trunk = TrunkNet(
-        input_dim=int(model_cfg.get("trunk_input_dim", 2)),
-        hidden_dim=int(model_cfg.get("hidden_dim", 128)),
-        output_dim=int(model_cfg.get("latent_dim", 128)),
-    )
-    model = DeepONet(branch, trunk)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    return model
-
-
-def _resolve_scenario(env_config: dict) -> dict:
-    """Merge env-config scenario fields with values from data.sumo_config.
-
-    The env config may either spell out every scenario constant
-    (N_x, T_ctrl, ...) or point at a SUMO config file via `sumo_config`.
-    This matches how `surrogate/train.py` resolves things.
-    """
-    cfg = dict(env_config)
-    sumo_config_path = cfg.get("sumo_config")
-    if sumo_config_path:
-        sumo_cfg = load_config(str(sumo_config_path))
-        net_cfg = sumo_cfg["network"]
-        sim_cfg = sumo_cfg["simulation"]
-        det_cfg = sumo_cfg["detectors"]
-        demand_cfg = sumo_cfg["demand"]
-
-        cfg.setdefault("highway_length_m", float(net_cfg["highway_length_m"]))
-        cfg.setdefault("duration_s", float(sim_cfg["duration_s"]))
-        cfg.setdefault("dt_ctrl_s", float(sim_cfg["dt_ctrl_s"]))
-        cfg.setdefault("N_x", int(det_cfg["n_detectors"]))
-        cfg.setdefault("detector_spacing_m", float(det_cfg["spacing_m"]))
-        cfg.setdefault(
-            "detector_start_position_m",
-            float(det_cfg.get("start_position_m", 2.0 * float(det_cfg["spacing_m"]))),
-        )
-        cfg.setdefault("ramp_demand_vph", float(demand_cfg["ramp_demand_vph"]))
-        if not cfg.get("demand_profiles"):
-            cfg["demand_profiles"] = [float(demand_cfg["mainline_demand_vph"])]
-    return cfg
 
 
 class SurrogateEnv(gym.Env):
@@ -102,241 +69,469 @@ class SurrogateEnv(gym.Env):
 
     metadata: dict = {"render_modes": []}
 
-    def __init__(self, surrogate_checkpoint: str, config: dict) -> None:
+    def __init__(
+        self,
+        surrogate_checkpoint: str | None = None,
+        config: dict | None = None,
+    ) -> None:
         """
         Args:
-            surrogate_checkpoint: Path to a trained DeepONet checkpoint (.pt).
-            config: Environment config. Recognized keys:
-                sumo_config (str): optional path to a SUMO config file to
-                    auto-derive scenario constants from.
-                demand_profiles (list[float]): demand values to sample
-                    from at each reset.
-                demand_min, demand_max (float): override demand-norm
-                    bounds. Default to min/max of demand_profiles.
-                ramp_demand_vph (float): max on-ramp inflow rate.
-                queue_norm_scale (float): obs-side queue normalizer
-                    (default 100).
-                reward (dict): RewardWeights.from_config payload.
-                N_x, T_ctrl, highway_length_m, duration_s, dt_ctrl_s,
-                detector_spacing_m, detector_start_position_m: scenario
-                    constants. Auto-filled from sumo_config if provided.
-                density_mean, density_std (float): override the
-                    surrogate's saved normalization. Default: use the
-                    values stored in the checkpoint.
-                device (str): "auto" | "cpu" | "cuda" | "mps". Default cpu.
+            surrogate_checkpoint: Path to trained DeepONet checkpoint (.pt).
+            config: Environment config (N_x, T_ctrl, demand_profiles, normalization stats, etc.).
         """
         super().__init__()
-        cfg = _resolve_scenario(config or {})
+        self.env_config = copy.deepcopy(config or {})
+        self.project_root = Path(
+            self.env_config.get("project_root", Path.cwd())
+        ).resolve()
 
-        # Scenario constants
-        self.N_x: int = int(cfg.get("N_x", 19))
-        self.highway_length_m: float = float(cfg.get("highway_length_m", 2000.0))
-        self.duration_s: float = float(cfg.get("duration_s", 3600.0))
-        self.dt_ctrl_s: float = float(cfg.get("dt_ctrl_s", 30.0))
-        self.T_ctrl: int = int(cfg.get("T_ctrl", self.duration_s / self.dt_ctrl_s))
-        detector_spacing_m: float = float(cfg.get("detector_spacing_m", 100.0))
-        detector_start_position_m: float = float(
-            cfg.get("detector_start_position_m", 2.0 * detector_spacing_m)
+        checkpoint_path = surrogate_checkpoint or self.env_config.get(
+            "surrogate_checkpoint"
         )
+        if checkpoint_path is None:
+            raise ValueError(
+                "SurrogateEnv requires a checkpoint path, either as the "
+                "surrogate_checkpoint argument or config['surrogate_checkpoint']."
+            )
+        self.checkpoint_path = self._resolve_path(checkpoint_path)
 
-        # Demand
-        demand_profiles = cfg.get("demand_profiles", [1500.0])
-        if not demand_profiles:
-            raise ValueError("config.demand_profiles must be non-empty")
-        self.demand_profiles: list[float] = [float(d) for d in demand_profiles]
-        self.demand_min: float = float(
-            cfg.get("demand_min", min(self.demand_profiles))
+        self.device = self._resolve_device(
+            str(self.env_config.get("device", "auto"))
         )
-        self.demand_max: float = float(
-            cfg.get("demand_max", max(self.demand_profiles))
-        )
+        checkpoint = torch.load(str(self.checkpoint_path), map_location=self.device)
+        if "model_state_dict" not in checkpoint:
+            raise KeyError(
+                f"{self.checkpoint_path} does not contain 'model_state_dict'."
+            )
 
-        # Queue and reward
-        self.ramp_demand_vph: float = float(cfg.get("ramp_demand_vph", 800.0))
-        self.queue_norm_scale: float = max(
-            float(cfg.get("queue_norm_scale", 100.0)), 1e-6
-        )
-        self._reward_weights = RewardWeights.from_config(cfg.get("reward"))
-
-        # Device
-        device_name = cfg.get("device", "cpu")
-        if device_name == "auto":
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        checkpoint_config = copy.deepcopy(checkpoint.get("config") or self.env_config)
+        if "project_root" in self.env_config:
+            checkpoint_config["project_root"] = str(self.project_root)
         else:
-            self.device = torch.device(device_name)
+            checkpoint_config.setdefault("project_root", str(self.project_root))
+        self.model_config = apply_sumo_config_defaults(checkpoint_config)
+        self.branch_input_dim = resolve_branch_input_dim(self.model_config)
 
-        # Load checkpoint and reconstruct the model
-        checkpoint = torch.load(
-            surrogate_checkpoint, map_location="cpu", weights_only=False
+        self.sumo_config = self._load_sumo_config(self.env_config, self.model_config)
+        sim_cfg = self.sumo_config["simulation"]
+        demand_cfg = self.sumo_config["demand"]
+        net_cfg = self.sumo_config["network"]
+
+        self.dt_ctrl = int(sim_cfg["dt_ctrl_s"])
+        self.duration_s = float(sim_cfg["duration_s"])
+        self.warmup_s = float(sim_cfg.get("ramp_warmup_s", 0.0))
+        self.T_ctrl = int(self.duration_s / self.dt_ctrl)
+        if self.branch_input_dim != self.T_ctrl:
+            raise ValueError(
+                "SurrogateEnv currently supports DeepONet checkpoints whose "
+                "branch input is exactly ramp_control with length T_ctrl. "
+                f"Got branch_input_dim={self.branch_input_dim}, T_ctrl={self.T_ctrl}."
+            )
+
+        self.highway_length_m = float(net_cfg["highway_length_m"])
+        self.x_grid = get_x_grid(self.sumo_config)
+        self.N_x = int(self.x_grid.shape[0])
+        self.t_grid = np.arange(self.T_ctrl, dtype=np.float32) * self.dt_ctrl
+
+        self.demand_levels = [
+            float(v)
+            for v in self.env_config.get(
+                "demand_levels", [demand_cfg["mainline_demand_vph"]]
+            )
+        ]
+        if not self.demand_levels:
+            raise ValueError("env.demand_levels must contain at least one value.")
+        if len({round(v, 9) for v in self.demand_levels}) > 1:
+            warnings.warn(
+                "The loaded surrogate uses ramp_control only as branch input, "
+                "so different demand_levels change the observation label but "
+                "not the surrogate dynamics. Train a demand-conditioned "
+                "surrogate before relying on multi-demand surrogate RL.",
+                stacklevel=2,
+            )
+        self.min_demand = float(
+            self.env_config.get("min_demand", min(self.demand_levels))
         )
-        norm = checkpoint["normalization"]
-        self.density_mean: float = float(
-            cfg.get("density_mean", norm["mean_density"])
-        )
-        self.density_std: float = max(
-            float(cfg.get("density_std", norm["std_density"])), 1e-6
+        self.max_demand = float(
+            self.env_config.get("max_demand", max(self.demand_levels))
         )
 
-        self.model = _build_model_from_checkpoint(checkpoint).to(self.device)
+        normalization = checkpoint.get("normalization", {})
+        if "mean_density" not in normalization or "std_density" not in normalization:
+            if (
+                "density_mean" not in self.env_config
+                or "density_std" not in self.env_config
+            ):
+                raise KeyError(
+                    "Surrogate checkpoint must contain normalization "
+                    "{'mean_density', 'std_density'}, or env config must provide "
+                    "density_mean and density_std."
+                )
+            normalization = {
+                "mean_density": self.env_config["density_mean"],
+                "std_density": self.env_config["density_std"],
+            }
+        self.density_mean = float(normalization["mean_density"])
+        self.density_std = max(float(normalization["std_density"]), 1e-6)
+
+        queue_cfg = self.env_config.get("queue", {}) or {}
+        self.ramp_arrival_vph = float(
+            self.env_config.get(
+                "ramp_arrival_vph",
+                queue_cfg.get("arrival_vph", demand_cfg["ramp_demand_vph"]),
+            )
+        )
+        self.ramp_discharge_vph = float(
+            self.env_config.get(
+                "ramp_discharge_vph",
+                queue_cfg.get("discharge_vph", self.ramp_arrival_vph),
+            )
+        )
+        if self.ramp_arrival_vph < 0.0:
+            raise ValueError("ramp_arrival_vph must be non-negative.")
+        if self.ramp_discharge_vph < 0.0:
+            raise ValueError("ramp_discharge_vph must be non-negative.")
+        if self.ramp_discharge_vph > self.ramp_arrival_vph + 1e-6:
+            warnings.warn(
+                "ramp_discharge_vph is greater than ramp_arrival_vph. "
+                "The virtual queue can drain faster than the baseline "
+                "surrogate branch input represents, so density predictions "
+                "will still see the clipped metering action in [0, 1].",
+                stacklevel=2,
+            )
+
+        reward_cfg = self.env_config.get("reward", {}) or {}
+        self.reward_weights = RewardWeights.from_config(reward_cfg)
+        self.queue_scale = float(
+            self.env_config.get(
+                "queue_scale",
+                self.env_config.get(
+                    "queue_norm_scale",
+                    queue_cfg.get(
+                        "scale",
+                        reward_cfg.get(
+                            "queue_scale",
+                            reward_cfg.get(
+                                "queue_norm",
+                                max(
+                                    self.ramp_arrival_vph
+                                    * self.duration_s
+                                    / 3600.0,
+                                    1.0,
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        )
+        if not np.isfinite(self.queue_scale):
+            raise ValueError("queue_scale must be finite.")
+        if self.queue_scale <= 0.0:
+            raise ValueError("queue_scale must be positive.")
+
+        self.reward_warmup_s = float(
+            self.env_config.get(
+                "reward_warmup_s",
+                reward_cfg.get("warmup_s", 0.0),
+            )
+        )
+        if not np.isfinite(self.reward_warmup_s):
+            raise ValueError("reward_warmup_s must be finite.")
+        if self.reward_warmup_s < 0.0:
+            raise ValueError("reward_warmup_s must be non-negative.")
+
+        self.model = _build_model(self.model_config).to(self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.eval()
-        for p in self.model.parameters():
-            p.requires_grad_(False)
 
-        # Pre-build trunk grid: x positions match detectors.py formula.
-        x_grid = np.array(
-            [detector_start_position_m + i * detector_spacing_m for i in range(self.N_x)],
+        self.action_space = spaces.Box(
+            low=np.array([0.0], dtype=np.float32),
+            high=np.array([1.0], dtype=np.float32),
             dtype=np.float32,
         )
-        t_grid = np.arange(self.T_ctrl, dtype=np.float32) * self.dt_ctrl_s
-        self._x_grid_norm = (x_grid / self.highway_length_m).astype(np.float32)
-        self._t_grid_norm = (t_grid / self.duration_s).astype(np.float32)
-
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
             shape=(self.N_x + 3,),
             dtype=np.float32,
         )
-        self.action_space = spaces.Box(
-            low=0.0, high=1.0, shape=(1,), dtype=np.float32
-        )
 
-        # Episode state (set by reset())
-        self._rng: np.random.Generator | None = None
-        self._u_history: np.ndarray | None = None
-        self._k: int = 0
-        self._current_demand_vph: float = float(self.demand_profiles[0])
-        self._current_density_phys: np.ndarray = np.zeros(self.N_x, dtype=np.float32)
-        self._analytical_queue: float = 0.0
+        self.base_seed = int(self.env_config.get("seed", sim_cfg.get("seed", 42)))
+        self.dt_ctrl_s = self.dt_ctrl
+        self.ramp_demand_vph = self.ramp_arrival_vph
+        self.rng = np.random.default_rng(self.base_seed)
+        self.episode_index = 0
+        self.k = 0
+        self.current_demand_vph = float(self.demand_levels[0])
+        self.current_density = np.zeros(self.N_x, dtype=np.float32)
+        self.current_queue_length = 0.0
+        self._queue_samples: list[float] = []
+        self.action_history = np.zeros(self.T_ctrl, dtype=np.float32)
+        self._started = False
 
     def reset(
         self, *, seed: int | None = None, options: dict | None = None
     ) -> tuple[np.ndarray, dict]:
-        """Sample a demand profile and reset the episode state."""
+        """Sample a demand profile and reset the episode state.
+
+        Returns:
+            observation: shape (N_x + 3,)
+            info: dict
+        """
         super().reset(seed=seed)
-        self._rng = np.random.default_rng(seed)
+        if seed is not None:
+            self.rng = np.random.default_rng(seed)
 
         options = options or {}
         if "demand_vph" in options:
-            self._current_demand_vph = float(options["demand_vph"])
+            demand_vph = float(options["demand_vph"])
         else:
-            idx = int(self._rng.integers(0, len(self.demand_profiles)))
-            self._current_demand_vph = float(self.demand_profiles[idx])
+            demand_vph = float(self.rng.choice(self.demand_levels))
 
-        self._u_history = np.zeros(self.T_ctrl, dtype=np.float32)
-        self._k = 0
-        self._analytical_queue = 0.0
+        self.episode_index += 1
+        self.k = 0
+        self.current_demand_vph = demand_vph
+        self.current_density = np.zeros(self.N_x, dtype=np.float32)
+        self.current_queue_length = 0.0
+        self._queue_samples = []
+        self.action_history = np.zeros(self.T_ctrl, dtype=np.float32)
+        self._started = True
 
-        density_norm = self._predict_density(self._u_history, self._k)
-        self._current_density_phys = self._denormalize_density(density_norm)
-        obs = self._build_observation(density_norm)
+        obs = self._make_observation()
         info = {
-            "demand_vph": self._current_demand_vph,
-            "analytical_queue": self._analytical_queue,
-            "k": self._k,
+            "demand_vph": self.current_demand_vph,
+            "time_s": 0.0,
+            "k": 0,
+            "analytical_queue": 0.0,
+            "backend": "surrogate",
         }
         return obs, info
 
     def step(
         self, action: np.ndarray
     ) -> tuple[np.ndarray, float, bool, bool, dict]:
-        """Apply action, query surrogate, update queue, compute reward."""
-        if self._u_history is None:
-            raise RuntimeError("step() called before reset()")
+        """Apply action, query surrogate, compute reward, advance time.
 
-        u_k = float(np.clip(np.asarray(action, dtype=np.float32).reshape(-1)[0], 0.0, 1.0))
-        self._u_history[self._k] = u_k
+        Args:
+            action: shape (1,), ramp metering rate ∈ [0, 1]
 
-        density_norm = self._predict_density(self._u_history, self._k)
-        density_phys = self._denormalize_density(density_norm)
-        self._current_density_phys = density_phys
+        Returns:
+            observation: shape (N_x + 3,)
+            reward: float
+            terminated: bool (True when episode ends at T_ctrl steps)
+            truncated: bool (always False in Phase 1)
+            info: dict
+        """
+        if not self._started:
+            raise RuntimeError("Call reset() before step().")
+        if self.k >= self.T_ctrl:
+            raise RuntimeError("Episode is done. Call reset() before stepping again.")
 
-        # Analytical queue update (mirrors SumoEnv exactly).
-        queue_growth = (1.0 - u_k) * self.ramp_demand_vph * self.dt_ctrl_s / 3600.0
-        self._analytical_queue = max(0.0, self._analytical_queue + queue_growth)
-        reward = compute_reward(
-            density_phys,
-            queue_length=self._analytical_queue,
-            weights=self._reward_weights,
+        ramp_rate = float(
+            np.clip(np.asarray(action, dtype=np.float32).reshape(-1)[0], 0.0, 1.0)
+        )
+        query_k = self.k
+        self.action_history[query_k] = ramp_rate
+        queue_info = self._advance_virtual_queue(ramp_rate, query_k)
+        pred_density_norm = self._predict_density_norm(query_k)
+        density = pred_density_norm * self.density_std + self.density_mean
+        density = self._clip_density(density).astype(np.float32, copy=False)
+        density_norm = ((density - self.density_mean) / self.density_std).astype(
+            np.float32,
+            copy=False,
         )
 
-        self._k += 1
-        terminated = self._k >= self.T_ctrl
-        truncated = False
+        self.current_density = density
+        reward_terms = self._reward_terms(density, self.current_queue_length)
+        raw_reward = compute_reward(
+            density,
+            queue_length=self.current_queue_length,
+            weights=self.reward_weights,
+        )
+        reward_warmup_active = self._reward_warmup_active(query_k)
+        reward = 0.0 if reward_warmup_active else raw_reward
 
-        # Build obs for the next state. On the final step we report the
-        # just-predicted density; otherwise we run one more forward pass at
-        # the new time index to give the policy a fresh state to act on.
-        if terminated:
-            next_density_norm = density_norm
-            next_k_for_time = self.T_ctrl
-        else:
-            next_density_norm = self._predict_density(self._u_history, self._k)
-            self._current_density_phys = self._denormalize_density(next_density_norm)
-            next_k_for_time = self._k
-        obs = self._build_observation(next_density_norm, time_index=next_k_for_time)
+        self.k += 1
+        terminated = self.k >= self.T_ctrl
+        truncated = False
+        obs = self._make_observation()
 
         info = {
-            "density_phys": density_phys,
-            "mean_density": float(np.mean(density_phys)),
-            "std_density": float(np.std(density_phys)),
-            "u": u_k,
-            "k": self._k,
-            "demand_vph": self._current_demand_vph,
-            "analytical_queue": self._analytical_queue,
+            "time_s": float(min(self.k, self.T_ctrl) * self.dt_ctrl),
+            "query_time_s": float(self.t_grid[query_k]),
+            "ramp_rate": ramp_rate,
+            "density": density.copy(),
+            "density_norm": density_norm.astype(np.float32, copy=True),
+            "mean_density": reward_terms["mean_density"],
+            "std_density": reward_terms["std_density"],
+            "density_excess": reward_terms["density_excess"],
+            "density_excess_penalty": reward_terms["density_excess_penalty"],
+            "queue_length": float(self.current_queue_length),
+            "analytical_queue": float(self.current_queue_length),
+            "queue_penalty": reward_terms["queue_penalty"],
+            "queue_scale": float(self.queue_scale),
+            "queue_norm": self._normalize_queue(self.current_queue_length),
+            "std_penalty": reward_terms["std_penalty"],
+            "reward_alpha": float(self.reward_weights.alpha),
+            "reward_beta": float(self.reward_weights.beta),
+            "reward_gamma": float(self.reward_weights.gamma),
+            "reward_rho_freeflow": float(self.reward_weights.rho_freeflow),
+            "reward_queue_norm": float(self.reward_weights.queue_norm),
+            "raw_reward": float(raw_reward),
+            "reward_warmup_active": float(reward_warmup_active),
+            "reward_warmup_s": float(self.reward_warmup_s),
+            "episode_queue_mean": float(np.mean(self._queue_samples))
+            if self._queue_samples
+            else 0.0,
+            "episode_queue_max": float(max(self._queue_samples))
+            if self._queue_samples
+            else 0.0,
+            "demand_vph": self.current_demand_vph,
+            "k": int(self.k),
+            "u": ramp_rate,
+            "backend": "surrogate",
+            **queue_info,
         }
         return obs, reward, terminated, truncated, info
 
-    def _predict_density(self, u_history: np.ndarray, k: int) -> np.ndarray:
-        """Forward the surrogate at time index k, return z-normalized density."""
-        branch = torch.from_numpy(u_history).to(self.device).unsqueeze(0)
-        t_k_norm = float(self._t_grid_norm[min(k, self.T_ctrl - 1)])
-        trunk_np = np.stack(
-            [
-                self._x_grid_norm,
-                np.full(self.N_x, t_k_norm, dtype=np.float32),
-            ],
-            axis=-1,
+    def close(self) -> None:
+        """Mark the environment as inactive."""
+        self._started = False
+
+    @torch.no_grad()
+    def _predict_density_norm(self, query_k: int) -> np.ndarray:
+        coords = self._trunk_query(query_k)
+        branch = torch.from_numpy(self.action_history).unsqueeze(0).to(self.device)
+        trunk = torch.from_numpy(coords).unsqueeze(0).to(self.device)
+        pred = self.model(branch, trunk).squeeze(0).detach().cpu().numpy()
+        if pred.shape != (self.N_x,):
+            raise RuntimeError(
+                f"Surrogate predicted shape {pred.shape}; expected ({self.N_x},)."
+            )
+        if not np.all(np.isfinite(pred)):
+            raise RuntimeError("Surrogate prediction contains NaN or Inf values.")
+        return pred.astype(np.float32, copy=False)
+
+    def _trunk_query(self, query_k: int) -> np.ndarray:
+        x_norm = self.x_grid / self.highway_length_m
+        t_norm = np.full(
+            self.N_x,
+            float(self.t_grid[query_k] / self.duration_s),
+            dtype=np.float32,
         )
-        trunk = torch.from_numpy(trunk_np).to(self.device).unsqueeze(0)
-        with torch.no_grad():
-            pred = self.model(branch, trunk)
-        return pred.squeeze(0).cpu().numpy().astype(np.float32)
+        return np.stack([x_norm.astype(np.float32), t_norm], axis=-1)
 
-    def _denormalize_density(self, density_norm: np.ndarray) -> np.ndarray:
-        return (density_norm * self.density_std + self.density_mean).astype(np.float32)
-
-    def _build_observation(
-        self, density_norm: np.ndarray, time_index: int | None = None
-    ) -> np.ndarray:
-        if time_index is None:
-            time_index = self._k
-
-        span = self.demand_max - self.demand_min
-        if span <= 1e-6:
-            demand_norm = 0.0
-        else:
-            demand_norm = (self._current_demand_vph - self.demand_min) / span
-
-        time_norm = float(time_index) / float(self.T_ctrl)
-        queue_norm = float(self._analytical_queue / self.queue_norm_scale)
+    def _make_observation(self) -> np.ndarray:
+        density_norm = (self.current_density - self.density_mean) / self.density_std
+        demand_norm = self._normalize_demand(self.current_demand_vph)
+        time_norm = float(min(self.k, self.T_ctrl) / max(self.T_ctrl, 1))
+        queue_norm = self._normalize_queue(self.current_queue_length)
         return np.concatenate(
             [
                 density_norm.astype(np.float32),
-                np.array(
-                    [demand_norm, time_norm, queue_norm],
-                    dtype=np.float32,
-                ),
+                np.array([demand_norm, time_norm, queue_norm], dtype=np.float32),
             ]
-        ).astype(np.float32)
+        )
 
+    def _advance_virtual_queue(self, ramp_rate: float, query_k: int) -> dict:
+        queue_before = float(self.current_queue_length)
+        interval_start_s = float(self.t_grid[query_k])
+        arrivals = 0.0
+        if interval_start_s >= self.warmup_s:
+            arrivals = self.ramp_arrival_vph * self.dt_ctrl / 3600.0
 
-def find_latest_checkpoint(runs_dir: str | Path) -> Path | None:
-    """Helper: return the latest deeponet_constant_inflow_*/best.pt under runs_dir.
+        release_capacity = ramp_rate * self.ramp_discharge_vph * self.dt_ctrl / 3600.0
+        available = queue_before + arrivals
+        released = min(available, release_capacity)
+        self.current_queue_length = max(available - released, 0.0)
+        self._queue_samples.append(self.current_queue_length)
 
-    Returns None if no matching checkpoint exists.
-    """
-    candidates = sorted(
-        Path(runs_dir).glob("deeponet_constant_inflow_*/best.pt")
-    )
-    return candidates[-1] if candidates else None
+        return {
+            "queue_before": queue_before,
+            "queue_after": float(self.current_queue_length),
+            "ramp_arrivals": float(arrivals),
+            "ramp_released": float(released),
+            "ramp_release_capacity": float(release_capacity),
+        }
+
+    def _reward_warmup_active(self, query_k: int) -> bool:
+        return float(self.t_grid[query_k]) < self.reward_warmup_s
+
+    def _normalize_demand(self, demand_vph: float) -> float:
+        span = self.max_demand - self.min_demand
+        if span <= 1e-6:
+            return 0.0
+        return float((demand_vph - self.min_demand) / span)
+
+    def _normalize_queue(self, queue_length: float) -> float:
+        return float(max(queue_length, 0.0) / self.queue_scale)
+
+    def _reward_terms(self, density: np.ndarray, queue_length: float) -> dict[str, float]:
+        w = self.reward_weights
+        mean_density = float(np.mean(density))
+        std_density = float(np.std(density))
+        density_excess = max(0.0, mean_density - w.rho_freeflow)
+        queue_scaled = float(queue_length) / max(w.queue_norm, 1e-6)
+        return {
+            "mean_density": mean_density,
+            "std_density": std_density,
+            "density_excess": density_excess,
+            "density_excess_penalty": float(w.alpha * density_excess),
+            "queue_penalty": float(w.beta * queue_scaled * queue_scaled),
+            "std_penalty": float(w.gamma * std_density),
+        }
+
+    def _clip_density(self, density: np.ndarray) -> np.ndarray:
+        clip_min = self.env_config.get("density_clip_min")
+        clip_max = self.env_config.get("density_clip_max")
+        if clip_min is None and clip_max is None:
+            return density
+        return np.clip(
+            density,
+            -np.inf if clip_min is None else float(clip_min),
+            np.inf if clip_max is None else float(clip_max),
+        )
+
+    def _load_sumo_config(self, env_config: dict, model_config: dict) -> dict:
+        if "sumo" in env_config:
+            sumo_config = copy.deepcopy(env_config["sumo"])
+        elif "sumo_config" in env_config:
+            sumo_config = load_config(str(self._resolve_path(env_config["sumo_config"])))
+        elif all(
+            k in env_config for k in ("network", "simulation", "demand", "detectors")
+        ):
+            sumo_config = copy.deepcopy(env_config)
+        else:
+            data_cfg = model_config.get("data", {})
+            sumo_config_path = data_cfg.get("sumo_config")
+            if not sumo_config_path:
+                raise KeyError(
+                    "SurrogateEnv config must provide 'sumo_config', a nested "
+                    "'sumo' dict, direct SUMO config keys, or use a checkpoint "
+                    "whose config.data.sumo_config is available."
+                )
+            model_project_root = Path(
+                model_config.get("project_root", self.project_root)
+            ).resolve()
+            sumo_path = Path(sumo_config_path)
+            if not sumo_path.is_absolute():
+                sumo_path = model_project_root / sumo_path
+            sumo_config = load_config(str(sumo_path))
+
+        overrides = env_config.get("sumo_overrides", {})
+        if overrides:
+            sumo_config = merge_configs(sumo_config, overrides)
+        return sumo_config
+
+    def _resolve_path(self, path: str | Path) -> Path:
+        p = Path(path)
+        if p.is_absolute():
+            return p
+        return self.project_root / p
+
+    @staticmethod
+    def _resolve_device(device_name: str) -> torch.device:
+        if device_name == "auto":
+            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return torch.device(device_name)

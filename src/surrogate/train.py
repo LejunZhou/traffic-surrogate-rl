@@ -177,6 +177,7 @@ def train(config: dict) -> None:
     training_cfg = config["training"]
     data_cfg = config["data"]
     output_cfg = config["output"]
+    project_root = Path(config.get("project_root", Path.cwd())).resolve()
     seed = int(training_cfg.get("seed", 42))
     _set_seed(seed)
 
@@ -185,6 +186,13 @@ def train(config: dict) -> None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
         device = torch.device(device_name)
+
+    resume_checkpoint = None
+    resume_checkpoint_path = training_cfg.get("resume_checkpoint")
+    if resume_checkpoint_path:
+        resume_path = _resolve_path(resume_checkpoint_path, project_root)
+        resume_checkpoint = torch.load(resume_path, map_location=device)
+        print(f"[train_surrogate] Resuming from: {resume_path}")
 
     run_dir = make_run_dir(
         output_cfg.get("base_dir", "runs/surrogate"),
@@ -196,12 +204,15 @@ def train(config: dict) -> None:
     split_index_file = data_cfg["split_index_file"]
     raw_dir = data_cfg.get("raw_dir")
     constant_demand = data_cfg.get("constant_mainline_demand_vph")
-    stats = compute_density_stats(
-        split_file=split_index_file,
-        split_name="train",
-        raw_dir=raw_dir,
-        constant_mainline_demand_vph=constant_demand,
-    )
+    if resume_checkpoint is not None and "normalization" in resume_checkpoint:
+        stats = resume_checkpoint["normalization"]
+    else:
+        stats = compute_density_stats(
+            split_file=split_index_file,
+            split_name="train",
+            raw_dir=raw_dir,
+            constant_mainline_demand_vph=constant_demand,
+        )
     with (run_dir / "normalization.json").open("w") as f:
         json.dump(stats, f, indent=2)
 
@@ -240,7 +251,9 @@ def train(config: dict) -> None:
     )
     val_loader = DataLoader(
         val_ds,
-        batch_size=int(training_cfg.get("eval_batch_size", training_cfg.get("batch_size", 16))),
+        batch_size=int(
+            training_cfg.get("eval_batch_size", training_cfg.get("batch_size", 16))
+        ),
         shuffle=False,
         num_workers=int(training_cfg.get("num_workers", 0)),
     )
@@ -254,6 +267,26 @@ def train(config: dict) -> None:
 
     n_epochs = int(training_cfg.get("n_epochs", 100))
     eval_every = int(training_cfg.get("eval_every", 1))
+    start_epoch = 1
+    best_val = float("inf")
+    if resume_checkpoint is not None:
+        model.load_state_dict(resume_checkpoint["model_state_dict"])
+        if "optimizer_state_dict" in resume_checkpoint:
+            optimizer.load_state_dict(resume_checkpoint["optimizer_state_dict"])
+        checkpoint_epoch = int(resume_checkpoint.get("epoch", 0))
+        start_epoch = checkpoint_epoch + 1
+        best_val = float(resume_checkpoint.get("best_val_mse", best_val))
+
+        extra_epochs = training_cfg.get("extra_epochs")
+        if extra_epochs is not None:
+            n_epochs = checkpoint_epoch + int(extra_epochs)
+        if n_epochs < start_epoch:
+            raise ValueError(
+                "Resume checkpoint is already at epoch "
+                f"{checkpoint_epoch}, but training.n_epochs={n_epochs}. "
+                "Increase training.n_epochs or pass --extra-epochs."
+            )
+
     wandb_cfg = output_cfg.get("wandb", {})
     logger = ExperimentLogger(
         run_dir,
@@ -263,10 +296,15 @@ def train(config: dict) -> None:
         wandb_run_name=wandb_cfg.get("run_name", run_dir.name),
         wandb_config=config,
     )
-    best_val = float("inf")
 
     print(f"[train_surrogate] Run dir: {run_dir}")
     print(f"[train_surrogate] Device : {device}")
+    if resume_checkpoint is not None:
+        print(
+            "[train_surrogate] Resume: "
+            f"start_epoch={start_epoch}, target_epoch={n_epochs}, "
+            f"best_val_mse={best_val:.6g}"
+        )
     print(
         "[train_surrogate] Samples: "
         f"train={len(train_ds)} "
@@ -282,7 +320,7 @@ def train(config: dict) -> None:
     )
 
     try:
-        for epoch in range(1, n_epochs + 1):
+        for epoch in range(start_epoch, n_epochs + 1):
             model.train()
             train_losses = []
             for branch_input, trunk_input, target in train_loader:
@@ -307,11 +345,27 @@ def train(config: dict) -> None:
                 metrics["val_mse"] = val_mse
                 if val_mse < best_val:
                     best_val = val_mse
-                    _save_checkpoint(run_dir / "best.pt", model, optimizer, config, epoch, stats, best_val)
+                    _save_checkpoint(
+                        run_dir / "best.pt",
+                        model,
+                        optimizer,
+                        config,
+                        epoch,
+                        stats,
+                        best_val,
+                    )
 
             logger.log(metrics, epoch)
 
-        _save_checkpoint(run_dir / "final.pt", model, optimizer, config, n_epochs, stats, best_val)
+        _save_checkpoint(
+            run_dir / "final.pt",
+            model,
+            optimizer,
+            config,
+            n_epochs,
+            stats,
+            best_val,
+        )
     finally:
         logger.close()
 
@@ -358,6 +412,20 @@ def _save_checkpoint(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train DeepONet surrogate")
     parser.add_argument("--config", required=True, help="Path to YAML config")
+    parser.add_argument(
+        "--resume",
+        default=None,
+        help="Path to a checkpoint .pt file to resume from.",
+    )
+    parser.add_argument(
+        "--extra-epochs",
+        type=int,
+        default=None,
+        help=(
+            "When resuming, train this many additional epochs beyond the "
+            "checkpoint epoch."
+        ),
+    )
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parent.parent.parent
@@ -366,6 +434,10 @@ def main() -> None:
 
     cfg = load_config(str(project_root / args.config))
     cfg["project_root"] = str(project_root)
+    if args.resume is not None:
+        cfg.setdefault("training", {})["resume_checkpoint"] = args.resume
+    if args.extra_epochs is not None:
+        cfg.setdefault("training", {})["extra_epochs"] = args.extra_epochs
     train(cfg)
 
 
