@@ -138,6 +138,24 @@ Surrogate density predictions stayed in a roughly physical range
 (min -0.42, max 43.92); brief small-negative spikes match what we
 saw in M5 of the old MVP and are still on the M3b backlog.
 
+## Plotting utility
+
+Added `scripts/plot_reward_curve.py` for PPO reward visualization:
+- Default source: `progress.csv` column `rollout/ep_rew_mean`.
+- Optional source: `monitor.csv` raw episode returns plus rolling mean.
+- `--max-steps N` crops the plot to points at or before timestep `N`.
+- If `--run-dir` is omitted, the script picks the latest PPO run under
+  `runs/rl` or `runs/ppo`.
+
+Added `scripts/plot_ppo_loss_curve.py` for PPO optimization-loss plots:
+- Default metrics: `train/loss`, `train/value_loss`,
+  `train/policy_gradient_loss`, and `train/entropy_loss`.
+- `--metric` selects one or more specific `train/*` metrics.
+- `--list-metrics` prints available loss/diagnostic columns in `progress.csv`.
+- `--max-steps N` uses the same timestep-cropping behavior.
+- `--smooth-window`, `--smooth-method`, `--hide-raw`, and
+  `--y-max-percentile` support cleaner report plots for noisy PPO losses.
+
 ## Acceptance verdict
 
 PASS.

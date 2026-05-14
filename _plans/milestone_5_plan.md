@@ -28,6 +28,11 @@ Out of scope:
   reward weights.
 - `runs/ppo/.../best_model.zip`, `final_model.zip`, `config_snapshot.yaml`,
   `wall_clock.json`, `evaluations.npz`, `monitor/*.csv`, TensorBoard logs.
+- `scripts/plot_reward_curve.py` — utility for plotting PPO reward curves
+  from `progress.csv` (`rollout/ep_rew_mean`) or `monitor.csv`, with
+  optional timestep cropping.
+- `scripts/plot_ppo_loss_curve.py` — utility for plotting PPO `train/*`
+  loss metrics from `progress.csv`, including smoothing/report-plot options.
 - `_plans/milestone_5_plan.md` (this file).
 - `_progress/milestone_5_progress.md` — running log.
 
