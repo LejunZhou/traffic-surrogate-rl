@@ -205,6 +205,12 @@ class SurrogateEnv(gym.Env):
         self.max_ramp_demand = float(max(self.ramp_demand_levels))
         self.current_ramp_demand_vph = float(self.ramp_demand_levels[0])
         self.observe_ramp_demand = bool(self.env_config.get("observe_ramp_demand", False))
+        # What the DeepONet branch receives per step: "action" (u itself; M2/M3
+        # open-loop datasets) or "inflow_frac" (released flow / discharge; datasets
+        # generated with demand.ramp_model = metered_queue, M7 §7.13).
+        self.surrogate_branch_input = str(self.env_config.get("surrogate_branch_input", "action"))
+        if self.surrogate_branch_input not in ("action", "inflow_frac"):
+            raise ValueError("env.surrogate_branch_input must be 'action' or 'inflow_frac'")
         if self.ramp_discharge_vph > max(self.ramp_demand_levels) + 1e-6 and not self.env_config.get(
             "quiet_ramp_discharge_warning", False
         ):
@@ -355,8 +361,15 @@ class SurrogateEnv(gym.Env):
             np.clip(np.asarray(action, dtype=np.float32).reshape(-1)[0], 0.0, 1.0)
         )
         query_k = self.k
-        self.action_history[query_k] = ramp_rate
         queue_info = self._advance_virtual_queue(ramp_rate, query_k)
+        if self.surrogate_branch_input == "inflow_frac":
+            # Metered-queue datasets store the physical inflow / discharge as
+            # the branch input, so feed the same quantity: what the queue
+            # actually released this interval, normalised by u = 1 capacity.
+            cap = self.ramp_discharge_vph * self.dt_ctrl / 3600.0
+            self.action_history[query_k] = float(np.clip(queue_info["ramp_released"] / max(cap, 1e-9), 0.0, 1.0))
+        else:
+            self.action_history[query_k] = ramp_rate
         pred_density_norm = self._predict_density_norm(query_k)
         density = pred_density_norm * self.density_std + self.density_mean
         density = self._clip_density(density).astype(np.float32, copy=False)

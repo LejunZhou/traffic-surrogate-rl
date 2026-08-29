@@ -152,11 +152,17 @@ Three things differ from the M2 dataset generated on the old Windows SUMO:
    rest of the hour** (smoke test: density mean 128 veh/km). If you want a mix of regimes,
    spread `dataset.demand_levels` over 1500–2000 (1500 + 800 never breaks down; 2000 + 800 does
    above u ≈ 0.6); if you want free flow only, cap the control range or use ≤ 1600 vph.
-2. **Ramp semantics.** The generator inserts `ramp_control × ramp_demand_vph` vehicles per
-   hour directly (open loop, no queue). The RL environment now uses a metered queue with
-   `ramp_discharge_vph` 1600 (u = green fraction), so an RL action u corresponds to a dataset
-   ramp flow of `min(u · 1600, arrivals + queue)` — keep this in mind when comparing
-   surrogate inputs to RL actions.
+2. **Ramp semantics (metered queue, same as the RL env).** With `demand.ramp_model:
+   metered_queue` (the `phase1_1.yaml` default since 2026-08-29) the generator runs the same
+   virtual queue as `SumoEnv`: vehicles arrive at `ramp_demand_vph`, wait upstream of the
+   meter, and the control signal u releases `min(u · ramp_discharge_vph, queue)` per step — so
+   the ramp inflow exceeds the arrival rate exactly when a queue exists and u > 0.5 (up to
+   1600 vph; smoke test: 1560 vph at u ≈ 1 after a low-u period). Each npz stores
+   `ramp_control` = **physical inflow / 1600** (the DeepONet branch input), `ramp_control_cmd`
+   = the command u, `ramp_inflow_vph`, and `ramp_queue`. A surrogate trained on such data must
+   be driven with `env.surrogate_branch_input: inflow_frac` in `SurrogateEnv` (the released
+   flow, not the raw action); the M2/M3 open-loop dataset and its checkpoint keep `"action"`.
+   `ramp_model: open_loop` restores the M2 behaviour (inflow = u · ramp_demand_vph, no queue).
 3. **Known measurement caveats, unchanged:** detector flow (and hence density = flow/speed)
    from E1 `getLastStepVehicleNumber` over-counts by ≈ 1.2× in free flow, and in gridlock
    the occupancy fallback saturates (summed lanes on the acceleration segment → up to

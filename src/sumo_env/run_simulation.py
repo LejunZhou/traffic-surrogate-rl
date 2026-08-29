@@ -39,6 +39,7 @@ except ImportError as exc:
     ) from exc
 
 from sumo_env.detectors import get_detector_ids, get_detector_ids_per_lane, get_x_grid
+from sumo_env.ramp_queue import MeteredRampQueue
 
 
 def run_simulation(
@@ -81,6 +82,16 @@ def run_simulation(
     sumo_binary: str = sim_cfg["sumo_binary"]
 
     ramp_demand_vph: float = demand_cfg["ramp_demand_vph"]
+    # Ramp model (M7 §7.13): "open_loop" inserts ramp_control * ramp_demand_vph
+    # directly (M2 behaviour, inflow <= ramp_demand_vph); "metered_queue" mirrors
+    # SumoEnv — arrivals at ramp_demand_vph wait in a virtual queue and the meter
+    # releases min(u * ramp_discharge_vph, queue), so inflow can exceed the
+    # arrival rate (up to ramp_discharge_vph) while a queue exists.
+    ramp_model: str = str(demand_cfg.get("ramp_model", "open_loop"))
+    if ramp_model not in ("open_loop", "metered_queue"):
+        raise ValueError(f"demand.ramp_model must be 'open_loop' or 'metered_queue', got {ramp_model!r}")
+    ramp_discharge_vph: float = float(demand_cfg.get("ramp_discharge_vph", ramp_demand_vph))
+    ramp_ref_vph: float = ramp_discharge_vph if ramp_model == "metered_queue" else ramp_demand_vph
     veh_len: float = det_cfg["vehicle_length_m"]     # for occupancy fallback
 
     det_ids = get_detector_ids(config)
@@ -118,7 +129,13 @@ def run_simulation(
     sumo_cmd += [str(a) for a in (sim_cfg.get("sumo_extra_args") or [])]
 
     veh_counter = 0          # global ramp vehicle ID counter
-    frac_accumulator = 0.0   # fractional carry-forward for ramp insertion
+    frac_accumulator = 0.0   # fractional carry-forward for ramp insertion (open loop)
+    meter = (
+        MeteredRampQueue(ramp_demand_vph, ramp_discharge_vph, step_len)
+        if ramp_model == "metered_queue" else None
+    )
+    ramp_inflow_vph = np.zeros(T_ctrl, dtype=np.float32)   # vehicles actually inserted
+    ramp_queue = np.zeros(T_ctrl, dtype=np.float32)        # virtual queue at end of step
 
     # Insertion / teleport counters (logged in metadata)
     total_insert_attempts = 0
@@ -139,8 +156,9 @@ def run_simulation(
             speed_count = np.zeros(N_x, dtype=np.int32)
             sum_occ = np.zeros(N_x, dtype=np.float64)
 
-            # Rate of ramp vehicle insertion this control step [veh/s]
+            # Rate of ramp vehicle insertion this control step [veh/s] (open loop)
             insert_rate = ramp_control[k] * ramp_demand_vph / 3600.0
+            inserted_k = 0
 
             for sub in range(dt_ctrl_steps):
                 # --- Ramp vehicle insertion (skipped during warmup) ---
@@ -148,9 +166,12 @@ def run_simulation(
                 # departSpeed=max) dissipate before any ramp vehicle arrives
                 # at the merge, preventing the cascade-blockage pattern.
                 if traci.simulation.getTime() >= warmup_s:
-                    frac_accumulator += insert_rate * step_len
-                    n_insert = int(frac_accumulator)
-                    frac_accumulator -= n_insert
+                    if meter is not None:
+                        n_insert = meter.step(float(ramp_control[k]))
+                    else:
+                        frac_accumulator += insert_rate * step_len
+                        n_insert = int(frac_accumulator)
+                        frac_accumulator -= n_insert
                     for _ in range(n_insert):
                         total_insert_attempts += 1
                         try:
@@ -165,6 +186,9 @@ def run_simulation(
                             )
                             veh_counter += 1
                             total_insert_success += 1
+                            inserted_k += 1
+                            if meter is not None:
+                                meter.on_released(1)
                         except traci.exceptions.TraCIException:
                             # SUMO rejected insertion (e.g. no space on ramp).
                             # The vehicle is skipped; the fractional accumulator
@@ -220,6 +244,8 @@ def run_simulation(
             density[:, k] = density_fd.astype(np.float32)
             speed[:, k] = mean_speed_kmph.astype(np.float32)
             flow[:, k] = flow_vph.astype(np.float32)
+            ramp_inflow_vph[k] = inserted_k * 3600.0 / dt_ctrl
+            ramp_queue[k] = meter.queue if meter is not None else 0.0
 
     finally:
         traci.close()
@@ -233,12 +259,29 @@ def run_simulation(
         "x_grid": x_grid,
         "t_grid": t_grid,
         "mainline_demand": mainline_demand,
-        "ramp_control": ramp_control.astype(np.float32),
+        # Surrogate branch input: the physical ramp inflow as a fraction of
+        # ramp_ref_vph. Open loop: identical to the command (M2 semantics,
+        # reference = ramp_demand_vph). Metered queue: inserted flow /
+        # ramp_discharge_vph, which differs from the command whenever the queue
+        # is empty (release < u * discharge) — the command is kept separately.
+        "ramp_control": (
+            (ramp_inflow_vph / ramp_ref_vph).astype(np.float32)
+            if ramp_model == "metered_queue" else ramp_control.astype(np.float32)
+        ),
+        "ramp_control_cmd": ramp_control.astype(np.float32),
+        "ramp_inflow_vph": ramp_inflow_vph,
+        "ramp_queue": ramp_queue,
         "metadata": {
             "seed": seed,
             "demand_profile": demand_cfg["demand_profile"],
             "mainline_demand_vph": demand_cfg["mainline_demand_vph"],
             "ramp_demand_vph": ramp_demand_vph,
+            "ramp_model": ramp_model,
+            "ramp_discharge_vph": ramp_discharge_vph,
+            "ramp_ref_vph": ramp_ref_vph,
+            "ramp_inflow_max_vph": float(ramp_inflow_vph.max()) if T_ctrl else 0.0,
+            "virtual_queue_max": float(ramp_queue.max()) if T_ctrl else 0.0,
+            "virtual_queue_final": float(ramp_queue[-1]) if T_ctrl else 0.0,
             "sumo_binary": sumo_binary,
             "T_ctrl": T_ctrl,
             "N_x": N_x,

@@ -11,6 +11,10 @@ env:
   # of that demand; other arrival rates are extrapolation for the surrogate.
   ramp_demand_levels: [800.0]
   observe_ramp_demand: true
+  # Branch input semantics must match the dataset the surrogate was trained on:
+  # "action" for the M2/M3 open-loop dataset (current checkpoint), "inflow_frac"
+  # for datasets generated with demand.ramp_model = metered_queue (M7 §7.13).
+  surrogate_branch_input: "action"
   sumo_config: "configs/sumo/phase1_1.yaml"
 
   # Replace this with the trained surrogate checkpoint to use for PPO.

@@ -286,6 +286,12 @@ def generate_dataset(
             t_grid=result["t_grid"],
             mainline_demand=result["mainline_demand"],
             ramp_control=result["ramp_control"],
+            ramp_control_cmd=result["ramp_control_cmd"],
+            ramp_inflow_vph=result["ramp_inflow_vph"],
+            ramp_queue=result["ramp_queue"],
+            ramp_model=np.array(result["metadata"]["ramp_model"]),
+            ramp_ref_vph=np.array(result["metadata"]["ramp_ref_vph"]),
+            ramp_discharge_vph=np.array(result["metadata"]["ramp_discharge_vph"]),
             seed=np.array(sim_config["simulation"]["seed"]),
             mainline_demand_vph=np.array(demand_vph),
             ramp_demand_vph=np.array(
@@ -314,6 +320,7 @@ def generate_dataset(
         print(
             f"  [{i+1:>{len(str(n_samples))}}/{n_samples}] "
             f"demand={int(demand_vph):>4}+{int(ramp_demand_vph):<3}, ctrl={control_type:<20s}, "
+            f"inflow_max={result['metadata']['ramp_inflow_max_vph']:4.0f}vph, "
             f"inserts={inserts}/{attempts}, {status}"
         )
 

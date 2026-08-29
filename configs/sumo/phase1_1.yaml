@@ -53,6 +53,14 @@ demand:
   # a single-lane ramp with the meter off. Constant-u results measured
   # before §7.10 are re-indexed: u_new = u_old * 800 / 1600.
   ramp_discharge_vph: 1600
+  # Ramp model for data generation (run_simulation.py). "metered_queue" =
+  # the same virtual queue as the RL env: arrivals at ramp_demand_vph wait,
+  # the control u releases min(u * ramp_discharge_vph, queue), so the ramp
+  # inflow exceeds 800 vph exactly when a queue exists and u > 0.5. The npz
+  # `ramp_control` then holds the physical inflow / ramp_discharge_vph (the
+  # surrogate branch input) and `ramp_control_cmd` the command u.
+  # "open_loop" = M2 behaviour (inflow = u * ramp_demand_vph, no queue).
+  ramp_model: "metered_queue"
   demand_profile: "constant"
 
 vehicle:

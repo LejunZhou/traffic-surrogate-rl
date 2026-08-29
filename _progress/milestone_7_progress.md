@@ -1226,6 +1226,25 @@ flow. Also documented the ramp-semantics difference (open-loop
 1600 in the RL env) and the unchanged E1 over-count / occupancy-ceiling
 caveats.
 
+**Metered-queue data generation (later the same day).** The user asked that
+the repo's SUMO setting deliver ramp inflow > 800 vph when a queue exists
+and u > 0.5 — in *both* code paths. `run_simulation.py` gained
+`demand.ramp_model` (`open_loop` = M2, `metered_queue` = the RL env's
+virtual queue, via the new `sumo_env/ramp_queue.MeteredRampQueue`, tested
+in `tests/test_ramp_queue.py`); `phase1_1.yaml` sets `metered_queue`. The
+npz now stores `ramp_control` = inflow / `ramp_discharge_vph` (branch
+input), `ramp_control_cmd` (u), `ramp_inflow_vph`, `ramp_queue`,
+`ramp_model`, `ramp_ref_vph`. `SurrogateEnv.surrogate_branch_input`
+(`action` | `inflow_frac`) feeds the released flow fraction for surrogates
+trained on such data (`ppo_surrogate.yaml` stays `action` for the M3
+checkpoint). Smoke test, 8 samples at 1500/2000 × 400/800: inflow max
+1560 vph at u ≈ 0.98 with a queue (2000 + 400), 1200–1320 vph in the +800
+cells, 480 (pass-through) for constant u at 400 vph arrivals; 0 teleports.
+Note the consequence for the surrogate dataset: flushes push the merge
+over capacity, so metered-queue samples contain more breakdowns than
+open-loop ones at the same command distribution (density means 19–146 in
+the smoke set) — intended, since that is what an RL flush does.
+
 ## Open items
 
 - ~~Ramp arrival rate not observed~~ — done in §7.11 (`observe_ramp_demand`, obs 22 → 23).
