@@ -1,4 +1,29 @@
-# PPO training directly in SUMO via TraCI (Milestone 6 / 6b / 7).
+# M7 run 4: run 3 + even narrower exploration + best-checkpoint saving.
+#
+# Run 3 result: deterministic policy peaked at 2,400 steps (-70, u 0.49)
+# then drifted down to -112 (u 0.38) while ep_rew_mean improved, because
+# with sigma_u ~ 0.18 the stochastic objective is maximised by a mean well
+# below the u >= 0.65 breakdown cliff. Two changes:
+#   - policy_kwargs.log_std_init: -2.0  -> sigma 0.135 (~0.07 in u), so the
+#     mean can sit near u = 0.6 without sampling over the edge
+#   - training.eval_freq: 2400 -> EvalCallback, deterministic, saves
+#     best_model.zip (the policy we actually deploy) instead of relying on
+#     the last iteration
+#
+# (Run 3 rationale below kept for the record.)
+#
+# Why: in run 2 (symmetric action box, this file's other settings) the
+# policy std stayed at 1.0 (~0.5 in u-units) for the whole run. PPO then
+# optimises the return of a very wide action distribution next to the
+# u >= 0.7 breakdown cliff, and the best *mean* for that distribution is
+# far below the u = 0.6 optimum: the deterministic policy slid from
+# u = 0.31 (-132, 2400 steps) to u = 0.13 (-209, 12000 steps) while the
+# stochastic ep_rew_mean kept improving. Three changes, all exploration-
+# side (reward and env untouched):
+#   - policy_kwargs.log_std_init: -1.0  -> initial std 0.37 (~0.18 in u)
+#   - ent_coef: 0.0                     -> nothing holds the std open
+#   - learning_rate: 3e-4               -> SB3 default; lets log_std adapt
+#
 # Pairs with src/rl/train_ppo.py via env.type=sumo.
 #
 # PPO algorithm + architecture mirror configs/rl/ppo_surrogate.yaml so the
@@ -25,8 +50,14 @@ env:
   # total at u=1). Matches the M5c surrogate training distribution
   # (dataset_constant_inflow.yaml) and the phase1_1.yaml scenario default.
   demand_levels: [2000.0]
-  ramp_demand_levels: [800.0]   # per-episode ramp arrival rate(s), M7 §7.10
-  observe_ramp_demand: true     # +1 obs feature (22 -> 23), M7 §7.10
+  # Ramp arrival rate per episode (vph), sampled uniformly at reset() like
+  # demand_levels. Single element = fixed 800 vph (scenario default). The
+  # scenario was verified for 400–800 vph ramp arrivals in M7 §7.10.
+  ramp_demand_levels: [800.0]
+  # Append the normalised ramp arrival rate to the observation (obs 22 -> 23).
+  # Needed when ramp_demand_levels has more than one value: the queue
+  # length alone lags the arrival rate (M7 §7.10).
+  observe_ramp_demand: true
 
   # z-score normalization for the density obs component. Pinned to the
   # M2 training-set stats so the obs distribution matches what the M5c
@@ -91,17 +122,18 @@ ppo:
       pi: [512, 512, 512]
       vf: [512, 512, 512]
     activation_fn: "tanh"
+    log_std_init: -2.0
   # 4 full episodes (4 x 120 control steps) per PPO update. M6/M6b used 120
   # (one episode) and the per-step SUMO noise was the suspected cause of
   # the u=0 collapse; averaging over 4 episodes halves the advantage noise.
   n_steps: 480
   batch_size: 120
   n_epochs: 5
-  learning_rate: 0.0001
+  learning_rate: 0.0003
   gamma: 0.99
   gae_lambda: 0.95
   clip_range: 0.2
-  ent_coef: 0.01
+  ent_coef: 0.0
   vf_coef: 0.5
   max_grad_norm: 0.5
   device: "auto"
@@ -115,17 +147,26 @@ training:
 
   seed: 42
   checkpoint_freq: 2400
+  # Deterministic eval on a second SumoEnv every eval_freq env steps;
+  # best_model.zip is written to the run dir when eval/mean_reward improves.
+  eval_freq: 2400
+  n_eval_episodes: 1
+  # Initial policy mean (metering rate) — see train_ppo._set_initial_action_mean.
+  # SB3's default start is u = 0.5, which with ramp_discharge_vph 1600 means
+  # 800 vph of ramp flow = immediate breakdown at 2000 vph mainline. 0.3
+  # = 480 vph, the best constant of the re-indexed sweep (M7 §7.10).
+  action_init_u: 0.3
   progress_bar: false
   wandb_info_log_freq: 1000
 
 output:
   base_dir: "runs/rl"
-  run_name: "ppo_sumo_outflow_reward"
+  run_name: "ppo_sumo_outflow_reward_m7_run4"
   wandb:
     enabled: true
     project: "sumo-to-pde"
     entity:
-    run_name: "ppo_sumo_outflow_reward"
+    run_name: "ppo_sumo_outflow_reward_m7_run4"
     tags:
       - "ppo"
       - "sumo"

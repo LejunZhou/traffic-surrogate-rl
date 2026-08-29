@@ -148,11 +148,11 @@ def _evaluate_run(run_dir: Path, beta: float, seed: int) -> dict:
             )
 
     learned = rollout_policy(
-        policy_arg=str(best_zip), seed=seed, beta=beta, alpha=1.0, gamma=1.0
+        policy_arg=str(best_zip), seed=seed, beta=beta, delta=0.0, gamma=1.0
     )
-    u0 = rollout_policy("u=0.0", seed=seed, beta=beta, alpha=1.0, gamma=1.0)
-    u05 = rollout_policy("u=0.5", seed=seed, beta=beta, alpha=1.0, gamma=1.0)
-    u1 = rollout_policy("u=1.0", seed=seed, beta=beta, alpha=1.0, gamma=1.0)
+    u0 = rollout_policy("u=0.0", seed=seed, beta=beta, delta=0.0, gamma=1.0)
+    u05 = rollout_policy("u=0.5", seed=seed, beta=beta, delta=0.0, gamma=1.0)
+    u1 = rollout_policy("u=1.0", seed=seed, beta=beta, delta=0.0, gamma=1.0)
 
     best_baseline = max(
         u0["total_reward"], u05["total_reward"], u1["total_reward"]

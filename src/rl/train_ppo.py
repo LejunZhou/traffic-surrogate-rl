@@ -22,7 +22,9 @@ import random
 import sys
 from pathlib import Path
 
+import gymnasium as gym
 import numpy as np
+import torch
 import yaml
 
 from utils.config import load_config
@@ -64,7 +66,7 @@ def train(config: dict) -> None:
     try:
         import torch
         from stable_baselines3 import PPO
-        from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback
+        from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback, EvalCallback
         from stable_baselines3.common.monitor import Monitor
         from stable_baselines3.common.logger import configure
     except ImportError as exc:
@@ -103,6 +105,7 @@ def train(config: dict) -> None:
     print(f"[train_ppo] Backend: {_backend_label(env_type)}")
 
     env = None
+    eval_env = None
     try:
         env = Monitor(_make_env(env_type, env_cfg), filename=str(run_dir / "monitor.csv"))
         callbacks = []
@@ -116,6 +119,36 @@ def train(config: dict) -> None:
                     name_prefix=f"ppo_{env_type}",
                 )
             )
+        eval_freq = int(training_cfg.get("eval_freq", 0))
+        if eval_freq > 0:
+            # Deterministic evaluation on a separate env instance; SB3 writes
+            # best_model.zip to the run dir whenever eval/mean_reward improves.
+            # The deployed policy is best_model.zip, not final_model.zip: on
+            # SUMO the deterministic policy can drift while the stochastic
+            # training return still improves (M7 runs 2-3).
+            eval_base = _make_env(env_type, env_cfg)
+            if bool(training_cfg.get("eval_cycle_cells", False)):
+                eval_base = CycleDemandCells(
+                    eval_base,
+                    demands=[float(v) for v in env_cfg.get("demand_levels", [])] or [None],
+                    ramps=[float(v) for v in env_cfg.get("ramp_demand_levels", [])] or [None],
+                    base_seed=int(training_cfg.get("eval_seed", 10_000)),
+                )
+                print(f"[train_ppo] eval cycles through {len(eval_base.cells)} (mainline, ramp) cells with fixed seeds")
+            eval_env = Monitor(eval_base)
+            callbacks.append(
+                EvalCallback(
+                    eval_env,
+                    best_model_save_path=str(run_dir),
+                    log_path=str(run_dir / "eval"),
+                    eval_freq=eval_freq,
+                    n_eval_episodes=int(training_cfg.get("n_eval_episodes", 1)),
+                    deterministic=True,
+                    render=False,
+                    verbose=1,
+                )
+            )
+            print(f"[train_ppo] EvalCallback: deterministic eval every {eval_freq} steps -> best_model.zip")
         info_callback = _make_wandb_info_callback(
             wandb_run,
             log_freq=int(training_cfg.get("wandb_info_log_freq", 1)),
@@ -139,6 +172,11 @@ def train(config: dict) -> None:
             tensorboard_log=None,
             **ppo_kwargs,
         )
+        init_u = training_cfg.get("action_init_u")
+        if init_u is not None:
+            _set_initial_action_mean(
+                model, float(init_u), symmetric=bool(env_cfg.get("symmetric_action", False))
+            )
         sb3_logger = configure(str(run_dir), ["stdout", "csv"])
         wandb_format = _make_wandb_output_format(wandb_run)
         if wandb_format is not None:
@@ -156,6 +194,8 @@ def train(config: dict) -> None:
     finally:
         if env is not None:
             env.close()
+        if eval_env is not None:
+            eval_env.close()
         if wandb_run is not None:
             wandb_run.finish()
 
@@ -172,6 +212,53 @@ def _ppo_kwargs(ppo_cfg: dict) -> dict:
         kwargs["policy_kwargs"] = _policy_kwargs(ppo_cfg["policy_kwargs"])
     kwargs.setdefault("verbose", 1)
     return kwargs
+
+
+class CycleDemandCells(gym.Wrapper):
+    """Deterministic evaluation schedule: successive resets walk through every
+    (mainline demand, ramp demand) cell in order with a fixed SUMO seed per
+    pass, so EvalCallback's mean over n_eval_episodes = n_cells compares the
+    same scenarios every time instead of a random draw of cells."""
+
+    def __init__(self, env, demands, ramps, base_seed: int):
+        super().__init__(env)
+        self.cells = [(d, r) for d in demands for r in ramps]
+        self.base_seed = int(base_seed)
+        self._i = 0
+
+    def reset(self, *, seed=None, options=None):
+        d, r = self.cells[self._i % len(self.cells)]
+        opts = dict(options or {})
+        if d is not None:
+            opts.setdefault("demand_vph", d)
+        if r is not None:
+            opts.setdefault("ramp_demand_vph", r)
+        opts.setdefault("sumo_seed", self.base_seed + self._i // len(self.cells))
+        self._i += 1
+        return self.env.reset(seed=seed, options=opts)
+
+
+def _set_initial_action_mean(model, u0: float, symmetric: bool) -> None:
+    """Start the Gaussian policy at metering rate u0 instead of SB3's default.
+
+    SB3 initialises the mean head (`policy.action_net`, a Linear layer) with
+    gain 0.01 and zero bias, so the untrained policy outputs a ≈ 0 for every
+    observation: u = 0.5 with env.symmetric_action, u = 0 (the clipped box
+    corner) without. Neither is chosen for the traffic; this sets the bias so
+    the initial deterministic action is u0 (read off the constant-u sweep),
+    leaving the weights untouched — the policy still maps observations to
+    actions from step one.
+    """
+    if not 0.0 <= u0 <= 1.0:
+        raise ValueError(f"training.action_init_u must be in [0, 1], got {u0}")
+    a0 = 2.0 * u0 - 1.0 if symmetric else u0
+    action_net = getattr(model.policy, "action_net", None)
+    if action_net is None or not hasattr(action_net, "bias"):
+        raise RuntimeError("action_init_u requires a Gaussian MlpPolicy with a Linear action_net")
+    with torch.no_grad():
+        action_net.bias.fill_(a0)
+    print(f"[train_ppo] action_init_u={u0}: initial policy mean set to a={a0:+.3f} "
+          f"({'symmetric' if symmetric else 'raw'} action space)")
 
 
 def _policy_kwargs(policy_kwargs_cfg: dict) -> dict:
@@ -211,6 +298,26 @@ def _activation_fn(name_or_cls):
 
 
 def _make_env(env_type: str, env_cfg: dict):
+    """Build the env and, if env.symmetric_action is true, expose PPO a
+    symmetric action Box [-1, 1] that gymnasium rescales to the env's [0, 1].
+
+    SB3 initialises the Gaussian policy mean at ~0 with std 1. On a [0, 1]
+    Box that puts the initial *deterministic* action at u = 0 (ramp closed)
+    and clips half of every sampled batch to 0, which is the u=0 collapse
+    seen in M6 / M6b / M7 run 1. With the symmetric Box the initial mean maps
+    to u = 0.5 and clipping is balanced. Evaluation scripts detect the
+    trained model's action-space bounds and undo the mapping.
+    """
+    env = _make_base_env(env_type, env_cfg)
+    if bool(env_cfg.get("symmetric_action", False)):
+        import gymnasium as gym
+
+        env = gym.wrappers.RescaleAction(env, min_action=-1.0, max_action=1.0)
+        print("[train_ppo] symmetric_action=true: PPO acts in [-1, 1], rescaled to u in [0, 1]")
+    return env
+
+
+def _make_base_env(env_type: str, env_cfg: dict):
     if env_type == "sumo":
         try:
             from rl.sumo_env_wrapper import SumoEnv
@@ -389,17 +496,19 @@ def _info_scalars(info: dict) -> dict[str, float]:
         "ramp_rate",
         "mean_density",
         "std_density",
-        "density_excess",
-        "density_excess_penalty",
+        "outflow_vph",
+        "lost_outflow_frac",
+        "outflow_penalty",
         "queue_length",
         "queue_penalty",
         "std_penalty",
         "queue_norm",
         "queue_scale",
-        "reward_alpha",
+        "reward_delta",
         "reward_beta",
         "reward_gamma",
-        "reward_rho_freeflow",
+        "reward_q_ref",
+        "reward_sigma_ref",
         "reward_queue_norm",
         "raw_reward",
         "reward_warmup_active",
@@ -420,6 +529,10 @@ def _info_scalars(info: dict) -> dict[str, float]:
         "insert_success",
         "insert_attempts",
         "insert_rejected",
+        "pending_mainline",
+        "episode_pending_mainline_max",
+        "discarded_mainline",
+        "discarded_ramp",
     )
     metrics = {}
     for key in keys:
@@ -482,10 +595,10 @@ def main() -> None:
         help="Override training.seed",
     )
     parser.add_argument(
-        "--reward-alpha",
+        "--reward-delta",
         type=float,
         default=None,
-        help="Override env.reward.alpha",
+        help="Override env.reward.delta (lost-outflow weight)",
     )
     parser.add_argument(
         "--reward-beta",
@@ -500,10 +613,16 @@ def main() -> None:
         help="Override env.reward.gamma",
     )
     parser.add_argument(
-        "--reward-rho-freeflow",
+        "--reward-q-ref",
         type=float,
         default=None,
-        help="Override env.reward.rho_freeflow",
+        help="Override env.reward.q_ref (outflow reference, veh/h)",
+    )
+    parser.add_argument(
+        "--reward-sigma-ref",
+        type=float,
+        default=None,
+        help="Override env.reward.sigma_ref (density-std normaliser, veh/km)",
     )
     parser.add_argument(
         "--reward-queue-norm",
@@ -531,10 +650,11 @@ def main() -> None:
         cfg.setdefault("training", {})["seed"] = int(args.seed)
 
     reward_overrides = {
-        "alpha": args.reward_alpha,
+        "delta": args.reward_delta,
         "beta": args.reward_beta,
         "gamma": args.reward_gamma,
-        "rho_freeflow": args.reward_rho_freeflow,
+        "q_ref": args.reward_q_ref,
+        "sigma_ref": args.reward_sigma_ref,
         "queue_norm": args.reward_queue_norm,
     }
     if any(value is not None for value in reward_overrides.values()):

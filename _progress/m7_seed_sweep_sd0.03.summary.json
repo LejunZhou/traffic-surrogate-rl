@@ -1,0 +1,62 @@
+[
+  {
+    "policy": "u=0.5",
+    "label": "constant u=0.50",
+    "n": 10,
+    "return_mean": -65.93679059097153,
+    "return_std": 0.09951715207769339,
+    "return_min": -66.10260532032441,
+    "return_max": -65.79638492102404,
+    "outflow_mean": 2352.0,
+    "action_mean": 0.5,
+    "breakdowns": 0
+  },
+  {
+    "policy": "u=0.45",
+    "label": "constant u=0.45",
+    "n": 10,
+    "return_mean": -81.02221538130479,
+    "return_std": 0.14408953515217204,
+    "return_min": -81.19535302688939,
+    "return_max": -80.76180291873098,
+    "outflow_mean": 2313.0,
+    "action_mean": 0.44999998807907104,
+    "breakdowns": 0
+  },
+  {
+    "policy": "runs/rl/ppo_sumo_outflow_reward_m7_run4_m7_seed0_20260827_225352/best_model.zip",
+    "label": "learned (ppo_sumo_outflow_reward_m7_run4_m7_seed0_20260827_225352) [symmetric-action]",
+    "n": 10,
+    "return_mean": -159.2326296027099,
+    "return_std": 56.311805874503875,
+    "return_min": -224.26752342978477,
+    "return_max": -61.19297711365905,
+    "outflow_mean": 2087.9,
+    "action_mean": 0.51812515899539,
+    "breakdowns": 9
+  },
+  {
+    "policy": "u=0.55",
+    "label": "constant u=0.55",
+    "n": 10,
+    "return_mean": -189.7979319569381,
+    "return_std": 43.14057722448287,
+    "return_min": -234.15753897066537,
+    "return_max": -121.15579245997085,
+    "outflow_mean": 1997.4,
+    "action_mean": 0.550000011920929,
+    "breakdowns": 10
+  },
+  {
+    "policy": "u=0.6",
+    "label": "constant u=0.60",
+    "n": 10,
+    "return_mean": -247.61119550067573,
+    "return_std": 2.743927335578648,
+    "return_min": -250.4290932834083,
+    "return_max": -243.09503343382823,
+    "outflow_mean": 1827.6,
+    "action_mean": 0.6000000238418579,
+    "breakdowns": 10
+  }
+]

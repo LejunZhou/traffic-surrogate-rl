@@ -13,7 +13,28 @@ This repository implements a surrogate-accelerated reinforcement learning pipeli
 
 ## Setup
 
-**Prerequisites:** Install [SUMO >= 1.18](https://sumo.dlr.de/docs/Downloads.php) and ensure `sumo` is on your PATH.
+**Option A — self-contained venv (macOS / Linux, no system SUMO needed).** The
+[`eclipse-sumo`](https://pypi.org/project/eclipse-sumo/) wheel ships the SUMO
+binaries (`sumo`, `netconvert`, `sumo-gui`) plus `traci`/`sumolib`, so the whole
+toolchain lives inside the project venv. Python >= 3.11 is required; if the
+system Python is older, [`uv`](https://docs.astral.sh/uv/) can fetch one:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh      # one-time, installs to ~/.local/bin
+uv python install 3.11
+uv venv .venv-traffic-rl --python 3.11
+uv pip install --python .venv-traffic-rl/bin/python -e ".[dev]" eclipse-sumo
+
+source .venv-traffic-rl/bin/activate                  # puts sumo/netconvert on PATH
+export PYTHONPATH=src
+sumo --version && python -m pytest tests/test_reward.py -q
+```
+
+`.venv-traffic-rl/` is gitignored. With the venv activated no `SUMO_HOME` export
+is needed (the `sumo` package resolves it to its own `site-packages/sumo`).
+
+**Option B — system SUMO.** Install [SUMO >= 1.18](https://sumo.dlr.de/docs/Downloads.php)
+(Windows MSI, macOS framework, or `apt`), make sure `sumo` is on your PATH, then:
 
 ```bash
 pip install -e ".[dev]"
@@ -74,50 +95,53 @@ python scripts/run_rollout.py \
 - 1-lane mainline + 100 m acceleration lane downstream of the on-ramp, 2000 m total, one on-ramp at 1300 m
 - DeepONet trained on density trajectories only (speed/flow logged for diagnostics)
 - PPO observation: density at 19 detectors + current demand + normalized time index + analytical queue (22 features)
-- Reward: shaped Phase 1 form — `-alpha · max(0, mean(rho) - rho_freeflow) - beta · (queue / queue_norm)^2 - gamma · std(rho)` (see `proposal.md` §"Reward (Phase 1 shaped)")
+- Reward (Milestone 7, SUMO path): `-delta · max(0, q_ref - q_out)/q_ref - beta · (queue / queue_norm)^2 - gamma · std(rho)/sigma_ref` — lost mainline outflow + ramp queue + spatial uniformity (see "Reward setup" below). The surrogate path runs the same reward with `delta = 0` (no flow prediction).
 - Mainline demand: single constant 2000 vph, ramp demand cap 800 vph
 - Multi-demand family training (low / medium / high constant + mild peak profile) is a deferred follow-up (Milestone 2c)
 
 ## Reward setup
 
-Both PPO paths (surrogate-trained in M5/M5c and SUMO-trained in M6/M6b) optimize the **same** shaped reward, computed each control step by `src/rl/reward.py::compute_reward` and called identically from `SurrogateEnv` and `SumoEnv`. Using one reward function across both envs is what lets us compare a surrogate-trained policy against a SUMO-trained one on the same yardstick.
-
-**Formula (per control step, with `rho` the 19-detector density vector in physical units veh/km):**
+Both PPO paths optimize a reward computed each control step by `src/rl/reward.py::reward_terms` and called identically from `SurrogateEnv` and `SumoEnv`. The reward is a sum of three non-positive, O(1)-per-step penalty terms:
 
 ```
-r(t) = -alpha * max(0, mean(rho(t)) - rho_freeflow)    # ReLU on mean-density excess
-       -beta  * (queue(t) / queue_norm)^2               # quadratic in on-ramp queue
-       -gamma * std(rho(t))                             # linear spatial-uniformity
+r(t) = -delta * max(0, q_ref - q_out(t)) / q_ref     # lost mainline outflow (network arrivals)
+       -beta  * (queue(t) / queue_norm)^2              # quadratic in on-ramp queue
+       -gamma * std(rho(t)) / sigma_ref                # spatial uniformity of density
 ```
 
-Each term is a non-negative penalty, so the reward is always ≤ 0.
+with `rho` the 19-detector density vector (veh/km), `queue` the virtual ramp queue (vehicles) and `q_out` the outflow downstream of the merge (veh/h): in `SumoEnv` the exact count of vehicles leaving the network per control interval. (The det_18 loop flow is also logged as `det18_flow_vph`, but E1 `getLastStepVehicleNumber` double-counts vehicles that straddle a 1 s step boundary — ~1.2× at 100 km/h — so it is not used for the reward.) The episode return is the undiscounted sum over the 120 control steps (PPO itself discounts with `gamma_ppo = 0.99`).
 
-**Default weights** — defined in `src/rl/reward.py` `RewardWeights` and overridden per experiment via the `env.reward` block in `configs/rl/ppo_surrogate.yaml` and `configs/rl/ppo_sumo.yaml`:
+**Weights** — `RewardWeights` in `src/rl/reward.py`, overridden per experiment via the `env.reward` block of the PPO config:
 
-| Symbol         | Value | What it controls                                                                 |
-| -------------- | ----- | -------------------------------------------------------------------------------- |
-| `alpha`        | 1.0   | Penalty on **mean density above free-flow**. Term is 0 below the threshold.       |
-| `beta`         | 1.0   | **Quadratic** penalty on the ramp queue. Cost grows fast as queue builds.        |
-| `gamma`        | 1.0   | Penalty on **spatial density variation** (discourages localized hotspots).        |
-| `rho_freeflow` | 20.0  | Free-flow threshold in veh/km; below this, the alpha-term contributes 0.        |
-| `queue_norm`   | 100.0 | Queue normalizer in vehicles; squared queue is divided by `queue_norm^2`.        |
+| Symbol       | `ppo_sumo.yaml` | `ppo_surrogate.yaml` | What it controls |
+| ------------ | --------------- | -------------------- | ---------------- |
+| `delta`      | 4.0             | **0.0**              | Weight on lost outflow. Must be 0 on the surrogate path: the DeepONet predicts density only, so no outflow is available there. |
+| `beta`       | 1.0             | 1.0                  | Quadratic ramp-queue penalty. |
+| `gamma`      | 1.3             | 1.0                  | Density-std (hotspot) penalty. |
+| `q_ref`      | 2260 veh/h      | —                    | Outflow reference. Measured peak from the M6 constant-policy table; the IDM 1-lane capacity (~2970 veh/h) is the alternative. |
+| `queue_norm` | 400 veh         | 200 veh              | Queue normaliser. |
+| `sigma_ref`  | 6.0 veh/km      | 67.7167              | Std normaliser (~dataset density std on the SUMO path; the surrogate value is the legacy divisor from the "Working PPO Surrogate" run). |
+| `warmup_s`   | 90 s            | 0                    | Reward masked to 0 before this time (first vehicle reaches det_18 after ~60 s). |
 
-**Analytical queue model** (same formula in both envs — `src/rl/sumo_env_wrapper.py` and `src/rl/surrogate_env.py`):
+**Balancing the three terms.** The SUMO weights are chosen so that no single term decides the optimum: `scripts/run_u_sweep_sumo.py` rolls constant policies u = 0.0 … 1.0 through SUMO and `scripts/balance_reward_terms.py` proposes `delta/beta/gamma` that equalise each term's episode-sum range across the sweep (anchored at `beta = 1`). The values above are a first pass from the M6 logged stats; re-run the sweep before training on a new scenario.
+
+**Virtual queue model** (same formula in both envs — `src/rl/sumo_env_wrapper.py` and `src/rl/surrogate_env.py`):
 
 ```
-queue[k+1] = max(0, queue[k] + (1 - u_k) * ramp_demand_vph * dt_ctrl_s / 3600)
-queue[0]   = 0   (reset every episode)
+queue[k+1] = max(0, queue[k] + arrivals - min(queue[k] + arrivals, u_k * discharge))
+arrivals = discharge = ramp_demand_vph * dt_ctrl_s / 3600 = 6.67 veh / step
 ```
 
-At `ramp_demand_vph = 800` and `dt_ctrl_s = 30 s`, queue grows by `(1 - u_k) * 6.67` vehicles per step (so ~800 over a closed-ramp episode, 0 over an open-ramp episode). **Important for SumoEnv:** the analytical queue above is what feeds the reward; SUMO's *measured* ramp queue (`traci.edge.getLastStepVehicleNumber("ramp")`) is recorded in the `info` dict for diagnostics but is **not** the reward signal. Sharing the analytical formula keeps M5c (surrogate-trained) and M6 (SUMO-trained) policies comparable.
+At `ramp_demand_vph = 800` and `dt_ctrl_s = 30 s`, the queue grows by `(1 - u_k) * 6.67` vehicles per step (~800 over a closed-ramp episode, 0 over an open-ramp episode) and never drains faster than arrivals. **Important for SumoEnv:** this virtual queue is what feeds the reward; SUMO's *measured* ramp occupancy (`traci.edge.getLastStepVehicleNumber("ramp")`) is recorded in the `info` dict for diagnostics only.
 
-**Why this form — M5 → M5b → M5c iteration history:**
+**Why this form — M5 → M5b → M5c → M7 history:**
 
-- **M5** used `-mean(density)` only. PPO converged to action mean ≈ 0.84 — essentially the ramp-open corner, because that minimizes density when there's no penalty for the resulting downstream spike.
-- **M5b** added a linear `-beta * queue_length` term and swept `beta ∈ {0.1, 0.3, 1.0, 3.0}` × 5 seeds. **No β broke the u=1.0 corner trap**: at u ≡ 1.0 the queue is identically 0, so a *linear* queue-weighted term contributes 0 regardless of β — it only penalizes interior policies that build queue, not the corner itself.
-- **M5c (current)** replaced the linear queue with the **ReLU-on-density + quadratic-on-queue** form above. The ReLU's `-alpha * max(0, mean(rho) - 20)` activates specifically at u ≈ 1.0 (where mean density crosses ~22 in this scenario), and the quadratic queue makes closer-to-closure policies expensive enough to keep u ≡ 0 from winning either. PPO finds a genuinely interior policy with action mean 0.688, std 0.426 — classic ramp metering (closed early, open late).
+- **M5** used `-mean(density)` only. PPO converged to action mean ≈ 0.84 — essentially the ramp-open corner.
+- **M5b** added a linear `-beta * queue` term and swept β. No β broke the u = 1.0 corner: at u ≡ 1.0 the queue is identically 0, so a linear queue term is free there.
+- **M5c** replaced the density term with a ReLU `-alpha * max(0, mean(rho) - 20)` and made the queue quadratic. PPO found an interior policy (action mean 0.688) on the surrogate; transferred to SUMO it beat direct SUMO training (M6/M6b), which collapsed to u ≡ 0.
+- **M7 (current)** replaces the ReLU-on-mean-density proxy with a direct **outflow** term. The proxy's threshold (20 veh/km) was tuned to fire at u ≈ 1, but in this scenario u = 1 is also the *maximum-outflow* state (2260 vph vs 1867 at u = 0.5): the term penalised throughput rather than protecting it. The outflow term rewards served flow directly; `std` keeps the hotspot penalty; the quadratic queue is unchanged. Caveat: at 2000 + 800 vph (< ~2970 vph capacity) SUMO shows no capacity drop, so outflow is monotone in u and the interior optimum still comes from the std/queue trade — see `_plans/milestone_7_plan.md`.
 
-Full rationale and decomposition: `proposal.md` §"Reward (Phase 1 shaped, Milestone 5c)", `_progress/milestone_5b_progress.md` (null sweep diagnostic), `_progress/milestone_5c_progress.md` (M5c validation run).
+Details: `_plans/milestone_7_plan.md`, `_progress/milestone_7_progress.md`, and `_progress/milestone_5b_progress.md` / `_progress/milestone_5c_progress.md` for the earlier iterations.
 
 ## Milestones completed
 
@@ -127,3 +151,4 @@ Full rationale and decomposition: `proposal.md` §"Reward (Phase 1 shaped, Miles
 - **M4** — Implemented `SurrogateEnv`, a Gymnasium environment that runs the M3 checkpoint with the same observation / action / shared-reward contract as `SumoEnv` so PPO training code is environment-agnostic; 7 pytest smoke tests pass.
 - **M5 / M5b / M5c** — Trained PPO on the surrogate (~3 min per 100k timesteps); iterated through three reward forms — baseline `-mean(density)` collapsed to u≈0.84, M5b's linear queue penalty sweep showed no β can break the u=1.0 corner trap, and **M5c's nonlinear `-α·ReLU(mean(ρ)−ρ_freeflow) − β·(queue/queue_norm)² − γ·std(ρ)`** finally produced a genuinely interior metering policy (action mean 0.688, std 0.426).
 - **M6** — Trained PPO directly in SUMO at 20k timesteps (~35 min, M5c reward); the SUMO-trained policy collapsed to u≈0 (sample starvation — only 42 PPO iterations vs M5c's 209) while the M5c surrogate-trained policy transferred to SUMO with only a 13% reward drop and **beat the SUMO-trained policy in SUMO by ~48%** — the headline surrogate-acceleration result. M6b at 100k SUMO timesteps (~3 hours, currently running) is testing whether the corner collapse goes away with more sample budget.
+- **M7** — Replaced the density-ReLU reward term with a direct mainline-**outflow** term, balanced the three terms from a constant-u sweep (`scripts/run_u_sweep_sumo.py` + `scripts/balance_reward_terms.py`), and fixed two SUMO+PPO blockers: a zero-initialised Gaussian on a [0, 1] action box (→ `env.symmetric_action`) and drifting exploration beside the merge's capacity cliff (→ `log_std_init −2` + `EvalCallback` best-checkpoint saving). Result on SUMO 1.27.1 at 2000 + 800 vph: `best_model.zip` return −61 (u ≈ 0.52, 2367 vph served, no breakdown) vs −65 for constant u = 0.5; the nominal best constant u = 0.6 (−43) is a knife edge that ±0.03 action noise tips into gridlock. The scenario itself is fully deterministic (SUMO seed has no effect); with a mild 3 % driver-speed spread (`vehicle.speed_dev`, new knob) the capacity edge drops to u ≈ 0.5, constant u = 0.5 is robust (−66 ± 0.1 over 10 seeds) and the deterministic-trained policy gridlocks in 9/10 seeds — so the next step is training under heterogeneity (`scripts/run_seed_sweep_sumo.py`). A SUMO scenario bug found on the way: after any merge breakdown, SUMO's `departSpeed="max"` left the mainline entry in a self-sustaining slow-insertion state (~76 km/h, ~1550 vph) for the rest of the episode, so every post-jam episode silently ran at reduced demand. Fixed in `configs/sumo/phase1_1.yaml` (`vehicle.depart_speed: desired` + `--extrapolate-departpos`; blocked vehicles wait and are conserved — the backlog drains after the jam at ≈2090 vph and is logged as `pending_mainline`, or set `max_depart_delay_s` to discard and count them instead; the ramp virtual queue is decremented on actual departure) — post-jam insertion is back to 2000 vph and a cleared jam no longer poisons the rest of the episode, verified with `scripts/run_forced_jam_sumo.py`; `scripts/check_demand_range_sumo.py` confirms exact insertion and jam recovery at every mainline demand 1500–2000 vph, with the merge capacity depending on the ramp share (2000 + 480 ok, 1600 + 800 breaks down). The ramp meter can now actually drain its queue: `ramp_discharge_vph: 1600` decouples the meter's saturation flow from the 800 vph arrival rate (u is the green fraction of 1600 vph, so u = 0.5 passes the full demand and u = 1 flushes a backlog at +800 vph; earlier constant-u results re-index as u_new = u_old/2, byte-identically), `env.ramp_demand_levels` samples the ramp arrival rate per episode, and `training.action_init_u` starts PPO at a chosen metering rate instead of SB3's accidental u = 0.5. SUMO tests before training (`_progress/milestone_7_progress.md` §7.10): at 2000 vph mainline the merge margin (~480 vph) is below the 800 vph arrivals, so the queue can only be drained when arrivals drop (400 vph → drained) or mainline demand is lower (1500 → an 800 vph release clears a 65-vehicle queue in 10 min). Ahead of a demand-range run the ramp arrival rate was added to the observation (`env.observe_ramp_demand`, 22 → 23 features) and the reward re-balanced over a 3 × 3 demand grid (99 constant-u episodes; δ 3.57 / β 1 / γ 0.063, `scripts/balance_reward_terms.py` is grid-aware). Deterministic no-jam episodes are unchanged in substance (returns move by ≤ 2), but the fixed scenario is harsher under driver heterogeneity — the old `"max"` insertion had been smoothing platoons — so at `speed_dev 0.03` the robust constant is now u = 0.45 (−81, 0/10 breakdowns; u = 0.5 breaks down in 3/10 seeds). Details: `_progress/milestone_7_progress.md`.

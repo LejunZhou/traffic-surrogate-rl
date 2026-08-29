@@ -273,6 +273,17 @@ def _write_routes(path: Path, config: dict) -> None:
     duration = sim_cfg["duration_s"]
     vph = demand_cfg["mainline_demand_vph"]
     tau = veh_cfg.get("idm_tau_s", 1.0)   # default: SUMO built-in IDM default
+    # Per-vehicle desired-speed spread (SUMO speedDev). 0.0 keeps Phase 1 fully
+    # deterministic (the SUMO seed then has no effect at all); SUMO's own
+    # default is 0.1. Set vehicle.speed_dev > 0 (e.g. via env.sumo_overrides)
+    # to get seed-dependent driver heterogeneity for error bars / robustness.
+    speed_dev = float(veh_cfg.get("speed_dev", 0.0))
+    # Mainline flow departSpeed. "max" (SUMO: fastest *safe* speed given the
+    # leader) lets SUMO insert vehicles at reduced speed behind a slow
+    # leader, which after a merge breakdown locks the entry into a
+    # ~1550 vph slow-insertion state (M7 §7.6). "desired" inserts at the
+    # vehicle's desired speed or waits.
+    depart_speed = str(veh_cfg.get("depart_speed", "max"))
     num_lanes = net_cfg.get("num_lanes", 1)
     depart_lane = "random" if num_lanes > 1 else "0"
     if _has_acceleration_lane(net_cfg):
@@ -285,7 +296,7 @@ def _write_routes(path: Path, config: dict) -> None:
     content = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         "<routes>\n"
-        '    <!-- Deterministic IDM driver: sigma=0, speedDev=0 (Phase 1). -->\n'
+        f'    <!-- IDM driver: sigma=0, speedDev={speed_dev:.2f} (0 = deterministic Phase 1). -->\n'
         f'    <!-- IDM headway tau={tau:.2f} s (from config vehicle.idm_tau_s). -->\n'
         '    <vType id="passenger"\n'
         '           carFollowModel="IDM"\n'
@@ -297,7 +308,7 @@ def _write_routes(path: Path, config: dict) -> None:
         f'           tau="{tau:.2f}"\n'
         f'           maxSpeed="{spd:.2f}"\n'
         '           speedFactor="1.0"\n'
-        '           speedDev="0.0"/>\n'
+        f'           speedDev="{speed_dev:.2f}"/>\n'
         '\n'
         f'    <route id="route_main" edges="{main_edges}"/>\n'
         f'    <route id="route_ramp" edges="{ramp_edges}"/>\n'
@@ -308,7 +319,7 @@ def _write_routes(path: Path, config: dict) -> None:
         f'          begin="0" end="{duration}"\n'
         f'          vehsPerHour="{vph}"\n'
         f'          departLane="{depart_lane}"\n'
-        '          departSpeed="max"/>\n'
+        f'          departSpeed="{depart_speed}"/>\n'
         "</routes>\n"
     )
     path.write_text(content)

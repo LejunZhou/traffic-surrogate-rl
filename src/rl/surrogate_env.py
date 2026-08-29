@@ -4,7 +4,8 @@ Gymnasium environment backed by the trained DeepONet surrogate.
 At each step, the agent provides a ramp metering action; the surrogate
 predicts the resulting density field; the reward is computed and returned.
 
-Observation (shape (N_x + 3,); 22 features for N_x=19):
+Observation (shape (N_x + 3,); 22 features for N_x=19; +1 ramp-arrival feature
+when env.observe_ramp_demand is true, inserted after `demand`):
     density[0:N_x]  — z-score normalized density at detector locations
     demand[N_x]     — min-max normalized current mainline demand ∈ [0, 1]
     time[N_x+1]     — normalized time index k / T_ctrl ∈ [0, 1]
@@ -41,7 +42,7 @@ import gymnasium as gym
 from gymnasium import spaces
 import torch
 
-from rl.reward import RewardWeights, compute_reward
+from rl.reward import RewardWeights, reward_terms as compute_reward_terms
 from sumo_env.detectors import get_x_grid
 from surrogate.deeponet import BranchNet, DeepONet, TrunkNet
 from surrogate.train import apply_sumo_config_defaults, resolve_branch_input_dim
@@ -184,19 +185,35 @@ class SurrogateEnv(gym.Env):
         self.ramp_discharge_vph = float(
             self.env_config.get(
                 "ramp_discharge_vph",
-                queue_cfg.get("discharge_vph", self.ramp_arrival_vph),
+                queue_cfg.get(
+                    "discharge_vph",
+                    demand_cfg.get("ramp_discharge_vph", self.ramp_arrival_vph),
+                ),
             )
         )
         if self.ramp_arrival_vph < 0.0:
             raise ValueError("ramp_arrival_vph must be non-negative.")
         if self.ramp_discharge_vph < 0.0:
             raise ValueError("ramp_discharge_vph must be non-negative.")
-        if self.ramp_discharge_vph > self.ramp_arrival_vph + 1e-6:
+        # Per-episode ramp arrival rate (parity with SumoEnv.ramp_demand_levels).
+        self.ramp_demand_levels = [
+            float(v) for v in self.env_config.get("ramp_demand_levels", [self.ramp_arrival_vph])
+        ]
+        if not self.ramp_demand_levels or any(v < 0.0 for v in self.ramp_demand_levels):
+            raise ValueError("env.ramp_demand_levels must be a non-empty list of rates >= 0")
+        self.min_ramp_demand = float(min(self.ramp_demand_levels))
+        self.max_ramp_demand = float(max(self.ramp_demand_levels))
+        self.current_ramp_demand_vph = float(self.ramp_demand_levels[0])
+        self.observe_ramp_demand = bool(self.env_config.get("observe_ramp_demand", False))
+        if self.ramp_discharge_vph > max(self.ramp_demand_levels) + 1e-6 and not self.env_config.get(
+            "quiet_ramp_discharge_warning", False
+        ):
             warnings.warn(
-                "ramp_discharge_vph is greater than ramp_arrival_vph. "
-                "The virtual queue can drain faster than the baseline "
-                "surrogate branch input represents, so density predictions "
-                "will still see the clipped metering action in [0, 1].",
+                "ramp_discharge_vph is greater than the ramp arrival rate (M7 §7.10: "
+                "u is the green fraction of the discharge capacity). The DeepONet "
+                "was trained on ramp_control as a fraction of ramp *demand*, so the "
+                "surrogate sees the metering action u directly; density predictions "
+                "for u > arrival/discharge are extrapolation.",
                 stacklevel=2,
             )
 
@@ -253,7 +270,7 @@ class SurrogateEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(self.N_x + 3,),
+            shape=(self.N_x + 3 + int(self.observe_ramp_demand),),
             dtype=np.float32,
         )
 
@@ -289,6 +306,11 @@ class SurrogateEnv(gym.Env):
         else:
             demand_vph = float(self.rng.choice(self.demand_levels))
 
+        if "ramp_demand_vph" in options:
+            self.current_ramp_demand_vph = float(options["ramp_demand_vph"])
+        else:
+            self.current_ramp_demand_vph = float(self.rng.choice(self.ramp_demand_levels))
+
         self.episode_index += 1
         self.k = 0
         self.current_demand_vph = demand_vph
@@ -301,6 +323,7 @@ class SurrogateEnv(gym.Env):
         obs = self._make_observation()
         info = {
             "demand_vph": self.current_demand_vph,
+            "ramp_demand_vph": self.current_ramp_demand_vph,
             "time_s": 0.0,
             "k": 0,
             "analytical_queue": 0.0,
@@ -343,12 +366,13 @@ class SurrogateEnv(gym.Env):
         )
 
         self.current_density = density
-        reward_terms = self._reward_terms(density, self.current_queue_length)
-        raw_reward = compute_reward(
-            density,
-            queue_length=self.current_queue_length,
-            weights=self.reward_weights,
+        # The DeepONet predicts density only, so no outflow measurement is
+        # available here; reward_terms() requires delta == 0 in that case
+        # (two-term queue + std reward on the surrogate path).
+        reward_terms = self._reward_terms(
+            density, self.current_queue_length, outflow_vph=None
         )
+        raw_reward = float(reward_terms["reward"])
         reward_warmup_active = self._reward_warmup_active(query_k)
         reward = 0.0 if reward_warmup_active else raw_reward
 
@@ -365,18 +389,20 @@ class SurrogateEnv(gym.Env):
             "density_norm": density_norm.astype(np.float32, copy=True),
             "mean_density": reward_terms["mean_density"],
             "std_density": reward_terms["std_density"],
-            "density_excess": reward_terms["density_excess"],
-            "density_excess_penalty": reward_terms["density_excess_penalty"],
+            "outflow_vph": reward_terms["outflow_vph"],
+            "lost_outflow_frac": reward_terms["lost_outflow_frac"],
+            "outflow_penalty": reward_terms["outflow_penalty"],
             "queue_length": float(self.current_queue_length),
             "analytical_queue": float(self.current_queue_length),
             "queue_penalty": reward_terms["queue_penalty"],
             "queue_scale": float(self.queue_scale),
             "queue_norm": self._normalize_queue(self.current_queue_length),
             "std_penalty": reward_terms["std_penalty"],
-            "reward_alpha": float(self.reward_weights.alpha),
+            "reward_delta": float(self.reward_weights.delta),
             "reward_beta": float(self.reward_weights.beta),
             "reward_gamma": float(self.reward_weights.gamma),
-            "reward_rho_freeflow": float(self.reward_weights.rho_freeflow),
+            "reward_q_ref": float(self.reward_weights.q_ref),
+            "reward_sigma_ref": float(self.reward_weights.sigma_ref),
             "reward_queue_norm": float(self.reward_weights.queue_norm),
             "raw_reward": float(raw_reward),
             "reward_warmup_active": float(reward_warmup_active),
@@ -388,6 +414,7 @@ class SurrogateEnv(gym.Env):
             if self._queue_samples
             else 0.0,
             "demand_vph": self.current_demand_vph,
+            "ramp_demand_vph": self.current_ramp_demand_vph,
             "k": int(self.k),
             "u": ramp_rate,
             "backend": "surrogate",
@@ -427,19 +454,29 @@ class SurrogateEnv(gym.Env):
         demand_norm = self._normalize_demand(self.current_demand_vph)
         time_norm = float(min(self.k, self.T_ctrl) / max(self.T_ctrl, 1))
         queue_norm = self._normalize_queue(self.current_queue_length)
+        scalars = [demand_norm]
+        if self.observe_ramp_demand:
+            scalars.append(self._normalize_ramp_demand(self.current_ramp_demand_vph))
+        scalars += [time_norm, queue_norm]
         return np.concatenate(
             [
                 density_norm.astype(np.float32),
-                np.array([demand_norm, time_norm, queue_norm], dtype=np.float32),
+                np.array(scalars, dtype=np.float32),
             ]
         )
+
+    def _normalize_ramp_demand(self, ramp_demand_vph: float) -> float:
+        span = self.max_ramp_demand - self.min_ramp_demand
+        if span <= 1e-6:
+            return 0.0
+        return float((ramp_demand_vph - self.min_ramp_demand) / span)
 
     def _advance_virtual_queue(self, ramp_rate: float, query_k: int) -> dict:
         queue_before = float(self.current_queue_length)
         interval_start_s = float(self.t_grid[query_k])
         arrivals = 0.0
         if interval_start_s >= self.warmup_s:
-            arrivals = self.ramp_arrival_vph * self.dt_ctrl / 3600.0
+            arrivals = self.current_ramp_demand_vph * self.dt_ctrl / 3600.0
 
         release_capacity = ramp_rate * self.ramp_discharge_vph * self.dt_ctrl / 3600.0
         available = queue_before + arrivals
@@ -467,20 +504,12 @@ class SurrogateEnv(gym.Env):
     def _normalize_queue(self, queue_length: float) -> float:
         return float(max(queue_length, 0.0) / self.queue_scale)
 
-    def _reward_terms(self, density: np.ndarray, queue_length: float) -> dict[str, float]:
-        w = self.reward_weights
-        mean_density = float(np.mean(density))
-        std_density = float(np.std(density))
-        density_excess = max(0.0, mean_density - w.rho_freeflow)
-        queue_scaled = float(queue_length) / max(w.queue_norm, 1e-6)
-        return {
-            "mean_density": mean_density,
-            "std_density": std_density,
-            "density_excess": density_excess,
-            "density_excess_penalty": float(w.alpha * density_excess),
-            "queue_penalty": float(w.beta * queue_scaled * queue_scaled),
-            "std_penalty": float(w.gamma * std_density),
-        }
+    def _reward_terms(
+        self, density: np.ndarray, queue_length: float, outflow_vph: float | None
+    ) -> dict[str, float]:
+        return compute_reward_terms(
+            density, queue_length, outflow_vph, self.reward_weights
+        )
 
     def _clip_density(self, density: np.ndarray) -> np.ndarray:
         clip_min_raw = self.env_config.get("density_clip_min", 0.0)
@@ -536,3 +565,14 @@ class SurrogateEnv(gym.Env):
         if device_name == "auto":
             return torch.device("cuda" if torch.cuda.is_available() else "cpu")
         return torch.device(device_name)
+
+
+def find_latest_checkpoint(runs_dir: str | Path) -> Path | None:
+    """Helper: return the latest deeponet_constant_inflow_*/best.pt under runs_dir.
+
+    Used by scripts/eval_constant_baselines.py and tests/test_surrogate_env.py.
+    (Originally added in M4, dropped in commit 1672424 while its callers kept
+    importing it; restored 2026-08-27.) Returns None if no checkpoint exists.
+    """
+    candidates = sorted(Path(runs_dir).glob("deeponet_constant_inflow_*/best.pt"))
+    return candidates[-1] if candidates else None

@@ -1,4 +1,17 @@
-# PPO training directly in SUMO via TraCI (Milestone 6 / 6b / 7).
+# M7 run 3: ppo_sumo.yaml + narrower / decaying exploration.
+#
+# Why: in run 2 (symmetric action box, this file's other settings) the
+# policy std stayed at 1.0 (~0.5 in u-units) for the whole run. PPO then
+# optimises the return of a very wide action distribution next to the
+# u >= 0.7 breakdown cliff, and the best *mean* for that distribution is
+# far below the u = 0.6 optimum: the deterministic policy slid from
+# u = 0.31 (-132, 2400 steps) to u = 0.13 (-209, 12000 steps) while the
+# stochastic ep_rew_mean kept improving. Three changes, all exploration-
+# side (reward and env untouched):
+#   - policy_kwargs.log_std_init: -1.0  -> initial std 0.37 (~0.18 in u)
+#   - ent_coef: 0.0                     -> nothing holds the std open
+#   - learning_rate: 3e-4               -> SB3 default; lets log_std adapt
+#
 # Pairs with src/rl/train_ppo.py via env.type=sumo.
 #
 # PPO algorithm + architecture mirror configs/rl/ppo_surrogate.yaml so the
@@ -25,8 +38,6 @@ env:
   # total at u=1). Matches the M5c surrogate training distribution
   # (dataset_constant_inflow.yaml) and the phase1_1.yaml scenario default.
   demand_levels: [2000.0]
-  ramp_demand_levels: [800.0]   # per-episode ramp arrival rate(s), M7 §7.10
-  observe_ramp_demand: true     # +1 obs feature (22 -> 23), M7 §7.10
 
   # z-score normalization for the density obs component. Pinned to the
   # M2 training-set stats so the obs distribution matches what the M5c
@@ -61,9 +72,9 @@ env:
   #   python scripts/run_u_sweep_sumo.py --out _progress/m7_u_sweep_seed0.jsonl
   #   python scripts/balance_reward_terms.py --sweep _progress/m7_u_sweep_seed0.jsonl
   reward:
-    delta: 3.572   # M7 §7.11: re-balanced over the 1500–2000 × 400–800 vph grid (was 4.45 at 2000+800 only)
+    delta: 4.45
     beta: 1.0
-    gamma: 0.063
+    gamma: 0.067
     q_ref: 2476.0
     queue_norm: 400.0
     sigma_ref: 6.0
@@ -91,17 +102,18 @@ ppo:
       pi: [512, 512, 512]
       vf: [512, 512, 512]
     activation_fn: "tanh"
+    log_std_init: -1.0
   # 4 full episodes (4 x 120 control steps) per PPO update. M6/M6b used 120
   # (one episode) and the per-step SUMO noise was the suspected cause of
   # the u=0 collapse; averaging over 4 episodes halves the advantage noise.
   n_steps: 480
   batch_size: 120
   n_epochs: 5
-  learning_rate: 0.0001
+  learning_rate: 0.0003
   gamma: 0.99
   gae_lambda: 0.95
   clip_range: 0.2
-  ent_coef: 0.01
+  ent_coef: 0.0
   vf_coef: 0.5
   max_grad_norm: 0.5
   device: "auto"
@@ -120,12 +132,12 @@ training:
 
 output:
   base_dir: "runs/rl"
-  run_name: "ppo_sumo_outflow_reward"
+  run_name: "ppo_sumo_outflow_reward_narrow_explore"
   wandb:
     enabled: true
     project: "sumo-to-pde"
     entity:
-    run_name: "ppo_sumo_outflow_reward"
+    run_name: "ppo_sumo_outflow_reward_narrow_explore"
     tags:
       - "ppo"
       - "sumo"

@@ -11,4 +11,8 @@ index.
 4. Gymnasium-compatible surrogate environment
 5. PPO training
 6. Evaluation in SUMO
-7. Comparison study and plots
+7. Outflow-based reward for SUMO+PPO (`milestone_7_plan.md`, 2026-08-27):
+   replace the M5c density-ReLU term with a direct mainline-outflow term,
+   balance the three terms from a constant-u sweep, retrain SUMO+PPO at
+   the current 2800 vph total demand
+8. Comparison study and plots (previously item 7)

@@ -99,25 +99,34 @@ def _make_action_callback(policy_arg: str):
     from stable_baselines3 import PPO
 
     model = PPO.load(str(policy_arg))
+    # Models trained with env.symmetric_action=true act in [-1, 1]; map back
+    # to the env's metering rate u in [0, 1] (see train_ppo._make_env).
+    symmetric = bool(np.asarray(model.action_space.low).reshape(-1)[0] < 0.0)
 
     def _learned(obs):
         action, _ = model.predict(obs, deterministic=True)
-        return action
+        action = np.asarray(action, dtype=np.float32).reshape(-1)
+        if symmetric:
+            action = (action + 1.0) / 2.0
+        return np.clip(action, 0.0, 1.0)
 
-    return _learned, f"learned ({Path(policy_arg).parent.name})"
+    label = f"learned ({Path(policy_arg).parent.name})"
+    if symmetric:
+        label += " [symmetric-action]"
+    return _learned, label
 
 
 def rollout_policy(
     policy_arg: str,
     seed: int,
     beta: float | None = None,
-    alpha: float | None = None,
+    delta: float | None = None,
     gamma: float | None = None,
 ) -> dict:
     """Run a deterministic 120-step rollout and return summary stats."""
     env_cfg = _resolve_env_config(
         policy_arg,
-        overrides={"alpha": alpha, "beta": beta, "gamma": gamma},
+        overrides={"delta": delta, "beta": beta, "gamma": gamma},
     )
     env = SurrogateEnv(
         surrogate_checkpoint=env_cfg["surrogate_checkpoint"],
@@ -169,7 +178,12 @@ def main() -> None:
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--beta", type=float, default=None, help="Override reward.beta")
-    parser.add_argument("--alpha", type=float, default=None, help="Override reward.alpha")
+    parser.add_argument(
+        "--delta",
+        type=float,
+        default=None,
+        help="Override reward.delta (must stay 0 on the surrogate path: no outflow prediction)",
+    )
     parser.add_argument("--gamma", type=float, default=None, help="Override reward.gamma")
     parser.add_argument(
         "--json",
@@ -182,7 +196,7 @@ def main() -> None:
         policy_arg=args.policy,
         seed=args.seed,
         beta=args.beta,
-        alpha=args.alpha,
+        delta=args.delta,
         gamma=args.gamma,
     )
 

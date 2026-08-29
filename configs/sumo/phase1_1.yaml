@@ -18,14 +18,53 @@ simulation:
   dt_ctrl_s: 30               # ramp metering control interval → T_ctrl = 120
   seed: 42
   sumo_binary: "sumo"
+  # --- Mainline insertion fix (M7 §7.8, 2026-08-28) ---------------------
+  # With SUMO defaults (departSpeed="max", wait-forever insertion) a merge
+  # breakdown left the entry in a self-sustaining slow-insertion state
+  # (~76 km/h, ~1550 vph) for the rest of the episode, i.e. the scenario
+  # silently ran at reduced demand after any jam. Three settings together
+  # restore 2000 vph insertion after a jam (verified with
+  # scripts/run_forced_jam_sumo.py):
+  #   vehicle.depart_speed: desired      -> insert at 120 km/h or wait
+  #   sumo_extra_args: --extrapolate-departpos -> keep the 1.8 s spacing
+  #                                        despite the 1 s step (else 1800 vph cap)
+  #   max_depart_delay_s: -1             -> vehicles blocked by a jam wait (SUMO
+  #                                        default) and are conserved: with the
+  #                                        two settings above the backlog now
+  #                                        drains after the jam (~2090 vph) instead
+  #                                        of locking the entry at 1550 vph. The
+  #                                        backlog is a virtual upstream queue,
+  #                                        logged as info["pending_mainline"].
+  #                                        Set e.g. 5 to discard instead
+  #                                        (counted in info["discarded_mainline"]).
+  # No-jam returns shift by <= 2 vs the pre-fix scenario because insertion
+  # positions change; nothing else differs in free flow.
+  max_depart_delay_s: -1
+  sumo_extra_args: ["--extrapolate-departpos"]
 
 demand:
   mainline_demand_vph: 2000   # medium-constant profile (CLAUDE.md original)
-  ramp_demand_vph: 800        # maximum ramp inflow (metering rate scales this)
+  ramp_demand_vph: 800        # ramp arrival rate (default; env.ramp_demand_levels can vary it per episode)
+  # Meter saturation flow: the action u is the green fraction of this, so
+  # release = u * 1600 vph while a queue exists (capped by the queue), i.e.
+  # u = 0.5 passes the full 800 vph demand and u = 1 drains a backlog at
+  # +800 vph. Before M7 §7.10 this equalled ramp_demand_vph, so a queue
+  # could never be worked off (u = 1 was mere pass-through). ~1600 vph is
+  # a single-lane ramp with the meter off. Constant-u results measured
+  # before §7.10 are re-indexed: u_new = u_old * 800 / 1600.
+  ramp_discharge_vph: 1600
   demand_profile: "constant"
 
 vehicle:
   idm_tau_s: 1.0              # IDM headway time (SUMO default, CLAUDE.md original)
+  # Mainline flow departSpeed (see simulation block, "Mainline insertion
+  # fix"): "desired" = insert at the desired speed or wait; SUMO's "max"
+  # inserted at the fastest *safe* speed and locked the entry into a slow
+  # ~1550 vph state after every merge breakdown.
+  depart_speed: "desired"
+  # speed_dev: 0.0            # per-vehicle desired-speed spread (SUMO speedDev);
+                              # 0 = fully deterministic scenario. Set > 0 (e.g.
+                              # 0.03 via env.sumo_overrides) for seed variability.
 
 detectors:
   n_detectors: 19

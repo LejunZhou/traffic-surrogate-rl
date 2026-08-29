@@ -1,0 +1,99 @@
+[
+ {
+  "u_jam": 1.0,
+  "jam_s": 600.0,
+  "u_after": 0.0,
+  "seed": 0,
+  "phases": [
+   [
+    0.3,
+    3600.0
+   ]
+  ],
+  "ramp_demand_vph": 800.0,
+  "ramp_discharge_vph": 1600.0,
+  "max_depart_delay_s": -1.0,
+  "total_reward": -42.734307845700584,
+  "arrived_vehicles": 2430,
+  "throughput_vph": 2430.0,
+  "teleports": 0,
+  "insert_rejected": 0,
+  "pending_mainline_final": 0,
+  "pending_mainline_max": 0,
+  "pending_ramp_max": 0,
+  "discarded_mainline": 0,
+  "discarded_ramp": 0,
+  "queue_final": 318.73333333333335,
+  "file": "flush_0.3_3600.json"
+ },
+ {
+  "u_jam": 1.0,
+  "jam_s": 600.0,
+  "u_after": 0.0,
+  "seed": 0,
+  "phases": [
+   [
+    1.0,
+    600.0
+   ],
+   [
+    0.0,
+    300.0
+   ],
+   [
+    0.3,
+    2700.0
+   ]
+  ],
+  "ramp_demand_vph": 800.0,
+  "ramp_discharge_vph": 1600.0,
+  "max_depart_delay_s": -1.0,
+  "total_reward": -255.6355332388109,
+  "arrived_vehicles": 1844,
+  "throughput_vph": 1844.0,
+  "teleports": 0,
+  "insert_rejected": 0,
+  "pending_mainline_final": 524,
+  "pending_mainline_max": 524,
+  "pending_ramp_max": 0,
+  "discarded_mainline": 0,
+  "discarded_ramp": 0,
+  "queue_final": 305.06666666666666,
+  "file": "flush_1.0_600-0.0_300-0.3_2700.json"
+ },
+ {
+  "u_jam": 1.0,
+  "jam_s": 600.0,
+  "u_after": 0.0,
+  "seed": 0,
+  "phases": [
+   [
+    1.0,
+    600.0
+   ],
+   [
+    0.0,
+    300.0
+   ],
+   [
+    1.0,
+    2700.0
+   ]
+  ],
+  "ramp_demand_vph": 800.0,
+  "ramp_discharge_vph": 1600.0,
+  "max_depart_delay_s": -1.0,
+  "total_reward": -343.0955236027145,
+  "arrived_vehicles": 1735,
+  "throughput_vph": 1735.0,
+  "teleports": 0,
+  "insert_rejected": 0,
+  "pending_mainline_final": 879,
+  "pending_mainline_max": 879,
+  "pending_ramp_max": 36,
+  "discarded_mainline": 0,
+  "discarded_ramp": 0,
+  "queue_final": 4.4,
+  "file": "flush_1.0_600-0.0_300-1.0_2700.json"
+ }
+]

@@ -110,6 +110,12 @@ def run_simulation(
         "--no-step-log",
         "--collision.action", "warn",
     ]
+    # Mirror SumoEnv: discard vehicles that cannot be inserted within this
+    # delay instead of replaying them later (post-jam artifact, M7 §7.6).
+    max_depart_delay_s = float(sim_cfg.get("max_depart_delay_s", -1.0))
+    if max_depart_delay_s >= 0.0:
+        sumo_cmd += ["--max-depart-delay", str(max_depart_delay_s)]
+    sumo_cmd += [str(a) for a in (sim_cfg.get("sumo_extra_args") or [])]
 
     veh_counter = 0          # global ramp vehicle ID counter
     frac_accumulator = 0.0   # fractional carry-forward for ramp insertion
