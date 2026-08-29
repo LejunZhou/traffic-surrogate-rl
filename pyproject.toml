@@ -28,6 +28,14 @@ dev = [
     "pytest>=7",
     "pytest-cov",
 ]
+# Self-contained SUMO (binaries + matching bindings) — the version matters:
+# the merge/insertion physics differ between SUMO releases (M7 progress §7.1),
+# and every M7 result was produced with 1.27.1.
+sumo = [
+    "eclipse-sumo==1.27.1",
+    "traci==1.27.1",
+    "sumolib==1.27.1",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

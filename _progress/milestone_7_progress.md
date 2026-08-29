@@ -1109,7 +1109,66 @@ in the 1500 cells (queue never released faster than 480 vph). Criteria:
 18-cell eval mean better than the best single constant, approaching the
 per-cell oracle, **0 breakdowns** in evaluation under `speed_dev 0.03`.
 
-Results: _pending_.
+### Training curve (finished 2026-08-29 16:00, 1 h 50 min wall-clock for 60k steps + 25 evals)
+
+Deterministic 18-cell eval mean (`eval/evaluations.npz`), one fixed seed
+per cell per pass:
+
+| steps | 2.4k | 4.8k | 7.2k | 9.6k | 12k | 14.4k | 16.8k | 19.2k | 21.6k | **24k** | 26.4k | 28.8k | 31.2k | 33.6k | 36k | 38.4k | 40.8k | 43.2k | 45.6k | 48k | 50.4k | 52.8k | 55.2k | 57.6k | 60k |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| mean | −92 | −104 | −95 | −84 | −94 | −93 | −75 | −73 | −70 | **−68** | −93 | −75 | −79 | −87 | −86 | −96 | −74 | −77 | −123 | −122 | −125 | −121 | −123 | −100 | −112 |
+| cells < −120 | 4 | 4 | 4 | 3 | 5 | 4 | 1 | 0 | 0 | 0 | 4 | 0 | 1 | 2 | 1 | 5 | 0 | 0 | 8 | 7 | 8 | 8 | 8 | 5 | 6 |
+
+Three phases:
+
+1. **0–24k: learning in the expected order.** First the ramp-arrival
+   feature (throttle at +800, open at +400), then the mainline axis
+   (throttle at 1900–2000). From 19.2k no cell gridlocks; best mean
+   **−68.1 at 24k** → `best_model.zip`. Per cell at 24k: 1500–1700 rows
+   −26 … −80, 1800–2000 rows −61 … −103 (no breakdowns).
+2. **24k–43k: plateau with oscillation** (−73 … −96), single cells
+   swinging ±40 between passes — the 1800/1900 rows sit on the capacity
+   edge under `speed_dev 0.03`, so a small policy change flips a cell
+   between −40 and −190.
+3. **43k–60k: destructive updates, then collapse.** PPO diagnostics
+   (`progress.csv`): `approx_kl` 0.034 (34.5k) → 0.059 (39k) → **0.112**
+   (44k) with `clip_fraction` 0.28–0.33 — updates far beyond the trust
+   region (no `target_kl` set, lr 3e-4, batch 120) — followed by
+   `approx_kl` ≈ 0.000 / `clip_fraction` 0 at 49k (policy saturated after
+   the jump) and `ep_rew_mean` sliding −94 → −141. From 45.6k the
+   deterministic policy gridlocks 7–8 of 18 cells (1700 + 600 −188,
+   1800 + 600/800 −210/−230). The learned `std` only moved 0.135 → 0.126,
+   so this is not an exploration-collapse; it is a policy jump.
+
+The checkpointing did its job (`best_model.zip` = 24k), but the run is
+not converged: half the budget was wasted after the plateau. For run 6:
+`target_kl: 0.02` (SB3 early-stops the epoch loop), lr 1e-4, and/or
+batch 240 — the standard remedies for exactly this signature; the
+plateau itself argues for more episodes per cell (≥ 28 was thin for
+18 cells on a knife edge) and for multi-seed evaluation (below).
+
+## 7.13 — Dataset generation on the fixed scenario (2026-08-29)
+
+The user's coworker will regenerate training data from the repo. Checked:
+`origin/main` (238b994) carries `configs/sumo/phase1_1.yaml`,
+`network_builder.py` (`departSpeed` from `vehicle.depart_speed`) and
+`run_simulation.py` (`--max-depart-delay`, `sumo_extra_args`);
+`configs/experiments/dataset_*.yaml` all use `phase1_1.yaml` as base. A
+2-sample smoke run of `sumo_env.dataset_generation` on the fixed scenario
+succeeded (routes `departSpeed="desired"`, 0 teleports, npz keys
+density/speed/flow/ramp_control/…). `pyproject.toml` gained a `[sumo]`
+extra pinning `eclipse-sumo==1.27.1` (+ traci/sumolib); README setup uses it.
+
+**Regime warning recorded in the README:** `sample_ramp_control` draws
+u ~ U[0, 1] × 800 vph and the dataset config uses `demand_levels: [2000]`,
+so on SUMO 1.27.1 most samples break down (smoke sample: density mean
+128 veh/km vs 18.7 in the M2 dataset, which the old SUMO's ≈ 1470 vph
+insertion kept in free flow). Suggested: spread `demand_levels` over
+1500–2000 for a mixed-regime dataset, or cap the control range for free
+flow. Also documented the ramp-semantics difference (open-loop
+`ramp_control × 800` in the generator vs metered queue with discharge
+1600 in the RL env) and the unchanged E1 over-count / occupancy-ceiling
+caveats.
 
 ## Open items
 

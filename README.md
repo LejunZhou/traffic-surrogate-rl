@@ -23,7 +23,7 @@ system Python is older, [`uv`](https://docs.astral.sh/uv/) can fetch one:
 curl -LsSf https://astral.sh/uv/install.sh | sh      # one-time, installs to ~/.local/bin
 uv python install 3.11
 uv venv .venv-traffic-rl --python 3.11
-uv pip install --python .venv-traffic-rl/bin/python -e ".[dev]" eclipse-sumo
+uv pip install --python .venv-traffic-rl/bin/python -e ".[dev,sumo]"   # pins SUMO 1.27.1
 
 source .venv-traffic-rl/bin/activate                  # puts sumo/netconvert on PATH
 export PYTHONPATH=src
@@ -133,6 +133,37 @@ arrivals = discharge = ramp_demand_vph * dt_ctrl_s / 3600 = 6.67 veh / step
 ```
 
 At `ramp_demand_vph = 800` and `dt_ctrl_s = 30 s`, the queue grows by `(1 - u_k) * 6.67` vehicles per step (~800 over a closed-ramp episode, 0 over an open-ramp episode) and never drains faster than arrivals. **Important for SumoEnv:** this virtual queue is what feeds the reward; SUMO's *measured* ramp occupancy (`traci.edge.getLastStepVehicleNumber("ramp")`) is recorded in the `info` dict for diagnostics only.
+
+### Generating training data on the current SUMO scenario (read before regenerating M2)
+
+The scenario every M7 result uses is `configs/sumo/phase1_1.yaml` on **SUMO 1.27.1**
+(`pip install -e ".[dev,sumo]"` pins it; other SUMO versions insert traffic differently,
+see `_progress/milestone_7_progress.md` §7.1). Dataset generation
+(`scripts/make_dataset.sh configs/experiments/dataset_constant_inflow.yaml`) picks the
+scenario up automatically — routes are written with `departSpeed="desired"`, SUMO runs with
+`--extrapolate-departpos`, and blocked vehicles wait — verified end-to-end on 2026-08-29.
+Three things differ from the M2 dataset generated on the old Windows SUMO:
+
+1. **The regime is different.** The old SUMO delivered only ≈ 1470 vph of the scheduled
+   2000 vph mainline, so M2 was free flow throughout (density mean 18.7 veh/km). SUMO 1.27.1
+   delivers the full 2000 vph, and the merge breaks down once ramp flow exceeds ≈ 480–560 vph
+   at that demand (§7.9). The generator draws `ramp_control` uniformly in [0, 1] as a fraction
+   of `ramp_demand_vph` = 800, so with `demand_levels: [2000]` **most samples gridlock for the
+   rest of the hour** (smoke test: density mean 128 veh/km). If you want a mix of regimes,
+   spread `dataset.demand_levels` over 1500–2000 (1500 + 800 never breaks down; 2000 + 800 does
+   above u ≈ 0.6); if you want free flow only, cap the control range or use ≤ 1600 vph.
+2. **Ramp semantics.** The generator inserts `ramp_control × ramp_demand_vph` vehicles per
+   hour directly (open loop, no queue). The RL environment now uses a metered queue with
+   `ramp_discharge_vph` 1600 (u = green fraction), so an RL action u corresponds to a dataset
+   ramp flow of `min(u · 1600, arrivals + queue)` — keep this in mind when comparing
+   surrogate inputs to RL actions.
+3. **Known measurement caveats, unchanged:** detector flow (and hence density = flow/speed)
+   from E1 `getLastStepVehicleNumber` over-counts by ≈ 1.2× in free flow, and in gridlock
+   the occupancy fallback saturates (summed lanes on the acceleration segment → up to
+   400 veh/km). Both are listed under "Open items" in the M7 progress file.
+
+`vehicle.speed_dev` is 0 (fully deterministic; the SUMO seed then changes nothing) — set it
+to e.g. 0.03 via the dataset config's SUMO overrides if seed-to-seed variability is wanted.
 
 **Why this form — M5 → M5b → M5c → M7 history:**
 
