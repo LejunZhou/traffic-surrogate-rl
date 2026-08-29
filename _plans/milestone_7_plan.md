@@ -168,7 +168,9 @@ give different traffic (mainline insertion).
   on a demand range (`demand_levels` 1500–2000, `ramp_demand_levels`
   400–800). Done 2026-08-28 (progress §7.11): ramp arrival rate in the
   observation (23 features) and weights re-balanced over the grid
-  (δ 3.572 / β 1 / γ 0.063). Next: the demand-range PPO run.
+  (δ 3.572 / β 1 / γ 0.063). Run 5 done 2026-08-29 (progress §7.12):
+  grid mean −70 vs −86 best constant, 3/54 breakdowns; degraded after
+  24k steps (approx_kl 0.11). Next: run 6 with `target_kl 0.02`, lr 1e-4.
 - **Flow surrogate** (second DeepONet trained on the dataset's `flow`
   field, queried at x = 1900 m) so `SurrogateEnv` can run `delta > 0`
   and the surrogate-vs-SUMO comparison is restored on the three-term

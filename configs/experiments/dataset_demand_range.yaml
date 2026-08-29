@@ -1,0 +1,33 @@
+# Dataset config for the demand-range surrogate (2026-08-29, M7 §7.13).
+# Mainline demand and ramp arrival rate both vary per sample, cycled so every
+# (mainline, ramp) cell is visited equally often; the ramp control signal is a
+# random open-loop profile in [0, 1] x ramp_demand_vph (see README "Generating
+# training data on the current SUMO scenario" for the regime this produces).
+
+base_sumo_config: "configs/sumo/phase1_1.yaml"
+
+dataset:
+  # 18 cells x 4 control types x 5 = 360 samples (~13 s each on an M-series Mac)
+  n_samples: 360
+  random_seed: 42
+
+  demand_levels: [1500, 1600, 1700, 1800, 1900, 2000]   # mainline, vph
+  ramp_demand_levels: [400, 600, 800]                   # ramp arrivals, vph
+
+  ramp_control_types:
+    - "constant"
+    - "piecewise_constant"
+    - "smooth"
+    - "ramp_step"
+
+splits:
+  train_frac: 0.7
+  val_frac: 0.15
+  test_frac: 0.15
+
+output:
+  raw_dir: "data/raw/training_data_demand_range"
+  splits_dir: "data/splits_demand_range"
+  network_dir: "data/raw/training_data_demand_range/network"
+  save_heatmaps: true
+  heatmap_every_n: 20

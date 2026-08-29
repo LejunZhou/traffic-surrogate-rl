@@ -191,6 +191,11 @@ def generate_dataset(
     start_index: int = int(ds.get("start_index", 0))
     overwrite: bool = bool(ds.get("overwrite", False))
     demand_levels: list[float] = ds["demand_levels"]
+    # Ramp arrival rates (vph) cycled per sample alongside the mainline levels;
+    # default = the scenario's demand.ramp_demand_vph (single level).
+    ramp_demand_levels: list[float] = [
+        float(v) for v in ds.get("ramp_demand_levels", [base_sumo_config["demand"]["ramp_demand_vph"]])
+    ]
     control_types: list[str] = ds["ramp_control_types"]
     save_heatmaps: bool = out.get("save_heatmaps", False)
     heatmap_every_n: int = out.get("heatmap_every_n", 10)
@@ -236,8 +241,10 @@ def generate_dataset(
     )
     for i in range(n_samples):
         sample_index = start_index + i
-        # Round-robin demand levels, random control type
+        # Round-robin over mainline levels, then ramp levels (so every
+        # (mainline, ramp) cell is visited equally often), random control type
         demand_vph = demand_levels[sample_index % len(demand_levels)]
+        ramp_demand_vph = ramp_demand_levels[(sample_index // len(demand_levels)) % len(ramp_demand_levels)]
         control_type = control_types[sample_index % len(control_types)]
 
         ramp_control = sample_ramp_control(control_type, T_ctrl, rng)
@@ -246,7 +253,7 @@ def generate_dataset(
         sim_config = merge_configs(
             base_sumo_config,
             {
-                "demand": {"mainline_demand_vph": demand_vph},
+                "demand": {"mainline_demand_vph": demand_vph, "ramp_demand_vph": ramp_demand_vph},
                 "simulation": {"seed": seed + sample_index},
             },
         )
@@ -306,7 +313,7 @@ def generate_dataset(
         attempts = result["metadata"]["insert_attempts"]
         print(
             f"  [{i+1:>{len(str(n_samples))}}/{n_samples}] "
-            f"demand={int(demand_vph):>4}, ctrl={control_type:<20s}, "
+            f"demand={int(demand_vph):>4}+{int(ramp_demand_vph):<3}, ctrl={control_type:<20s}, "
             f"inserts={inserts}/{attempts}, {status}"
         )
 

@@ -1147,6 +1147,62 @@ batch 240 — the standard remedies for exactly this signature; the
 plateau itself argues for more episodes per cell (≥ 28 was thin for
 18 cells on a knife edge) and for multi-seed evaluation (below).
 
+### Robustness sweep: `best_model.zip` (24k) vs constants, 18 cells × 3 seeds, `speed_dev 0.03`
+
+`scripts/eval_policy_grid_sumo.py` (new), data
+`_progress/m7_run5_grid_eval.jsonl` / `.summary.json`. Mean ± std over
+seeds 0–2; b = breakdown episodes (ρ_max > 60); u = mean action.
+
+| cell | best_model (u) | constant u = 0.25 | constant u = 0.30 |
+|---|---|---|---|
+| 1500 + 400 | −102.8 (0.36) | −102.7 | −102.7 |
+| 1500 + 600 | **−78.3** (0.35) | −112.7 | −93.8 |
+| 1500 + 800 | **−95.7** (0.34) | −142.7 | −115.9 |
+| 1600 + 600 | **−69.9** (0.32) | −95.9 | −77.3 |
+| 1600 + 800 | **−91.8** (0.31) | −125.9 | −99.3 |
+| 1700 + 600 / 800 | −61.5 / −86.6 (0.30 / 0.29) | −79.6 / −109.7 | −60.9 / −82.9 |
+| 1800 + 600 / 800 | −48.7 / −74.1 (0.29) | −63.6 / −93.7 | −44.9 / −66.9 |
+| 1900 + 400 | −37.3 (0.25) | −37.0 | −37.1 |
+| 1900 + 600 | −47.9 (0.25) | −47.0 | −164.7 ± 55, b3 |
+| 1900 + 800 | −79.8 (0.24) | −77.1 | −186.7 ± 55, b3 |
+| 2000 + 400 | **−26.5** (0.23) | −64.5 ± 74, b1 | −145.3, b3 |
+| 2000 + 600 | −77.2 ± 64, b2 (0.21) | −74.5 ± 74, b1 | −198.4, b3 |
+| 2000 + 800 | **−74.1** (0.23), b1 | −104.5 ± 74, b1 | −220.5, b3 |
+| **grid mean** | **−70.1** | −85.6 | −105.9 |
+| grid min | −151 | −190 | −223 |
+| **breakdowns** | **3 / 54** | 3 / 54 | 15 / 54 |
+
+Reading:
+
+1. **The policy learned the demand-dependent throttle**: mean action
+   0.36 at 1500 vph falling monotonically to 0.21–0.25 at 1900–2000 vph
+   — exactly the structure the constant sweeps said was needed — and
+   beats the best single constant (u = 0.25, −85.6) by 15 return units
+   with the same breakdown count, and u = 0.30 (−105.9, 15 breakdowns)
+   by 36. First M7 policy that is better than every constant on its
+   own scenario *and* robust under driver heterogeneity.
+2. **Residual breakdowns are all in the 2000 + 600/800 cells** (3 of 6
+   seed-episodes); u ≈ 0.21–0.23 there is still on the edge under
+   `speed_dev 0.03`. A slightly lower action in exactly those cells
+   would remove them (constant 0.25 also breaks 3/54 — the edge is
+   below 400 vph of ramp flow at 2000 vph with heterogeneity).
+3. **It is too conservative at low demand.** At 1500–1700 vph the
+   learned u ≈ 0.30–0.36 is barely above the constant, whereas the
+   merge has room for u ≥ 0.5–1.0 there (1500 + 800: −48 possible vs
+   −96 achieved; 1500 + 400: nothing to gain beyond pass-through). The
+   deterministic 24k checkpoint had not yet explored that far up before
+   the run destabilised — the main upside left for run 6.
+4. Seed-to-seed std is ≈ 0–1 wherever nothing breaks down: with
+   `speed_dev 0.03` the free-flow returns are effectively deterministic;
+   heterogeneity only matters at the edge (std 55–74 there).
+
+**Verdict:** run 5 delivers a usable demand-conditioned metering policy
+(`best_model.zip`, 24k steps, grid mean −70 vs −86 for the best constant,
+3/54 breakdowns) and a clear diagnosis of why the run then degraded
+(trust-region blow-up). Run 6: same setup + `target_kl 0.02`, lr 1e-4,
+`n_eval_episodes 18` retained, ≥ 60k steps; expect the low-demand cells
+to open up and the 2000 + 600/800 edge to be respected.
+
 ## 7.13 — Dataset generation on the fixed scenario (2026-08-29)
 
 The user's coworker will regenerate training data from the repo. Checked:
