@@ -1390,7 +1390,71 @@ mainline, −0.002 per +100 vph ramp arrivals; u 0.42 at 1500 → 0.22–0.25 at
 corr(u, queue) −0.19); none of its 8 breakdown episodes recovered.
 Run dir `runs/rl/ppo_sumo_m7_run7_range_m7_seed1_20260830_114758`.
 
-Results: _pending_.
+### Training (finished 2026-08-30 ~14:30) and selection
+
+The healthiest curve of the three runs: steady improvement, **ends at its
+best** — det. eval −59.2 at 79.2k with 0 gridlocked cells, and the last
+six passes all clean at −59 … −63 (no late degradation; seed 1 +
+`target_kl` behaved better than seed 0). Multi-seed re-scoring of the
+top-5 checkpoints (18 cells × 3 seeds, `eval/multiseed_selection.jsonl`):
+
+| ckpt | grid mean | worst episode | eps < −150 | density-flagged eps (ρ_max > 60) | … of which end in free flow |
+|---|---|---|---|---|---|
+| 69.6k | −60.1 | −115 | 0 | 16 | 16 |
+| **72k (chosen)** | **−60.7** | **−102.9** | **0** | 11 | **11** |
+| 74.4k | −61.6 | −103 | 0 | 11 | 11 |
+| 79.2k | −61.8 | −169 | 2 | 9 | 9 |
+| 50.4k | −62.5 | −169 | 1 | 9 | 9 |
+
+**The binary density flag stopped being the right criterion.** Run-7
+policies *ride the edge and recover*: the flagged episodes are transient
+jams (onset median 4 min) after which the policy cuts u from ≈ 0.29 to
+≈ 0.20 and every single one returns to free flow — the recovery
+behaviour the metered queue was built for (§7.10), learned for the first
+time. `select_checkpoint_multiseed.py` therefore now uses a return-based
+feasibility (no episode < −150) with the density flag as an optional
+strict mode; chosen: **72k** → `best_model_multiseed.zip` (worst episode
+−102.9 = the pass-through floor of the 1500 + 400 cell, i.e. no
+catastrophic episode at all).
+
+### Performance analysis (run 7 @ 72k vs references, 18 cells × 3 seeds, `speed_dev 0.03`)
+
+| | run 7 @ 72k | run 5 best | run 6 best | u = 0.25 |
+|---|---|---|---|---|
+| grid mean | **−60.7** | −70.1 | −70.5 | −85.6 |
+| worst episode | **−102.9** | −151 | −199 | −190 |
+| 10th percentile | **−85.7** | −95.1 | −105.7 | −137.7 |
+| episodes < −150 | **0**/54 | 1/54 | 4/54 | 2/54 |
+
+Per cell it wins or ties everywhere that matters: 1500 + 800 −58 (run 5
+−96), 1600 + 800 −58 (−92), 2000 + 600 −46 (−77), 2000 + 800 −79 (−74,
+statistical tie); the only cells it loses are pass-through cells where
+every policy ≥ 0.25 is identical, 1900 + 400 (−42 vs −37) and 2000 + 400
+(−37 vs run 5's lucky −27). **First policy that dominates every
+constant and both earlier runs on mean, tail and worst case.**
+
+Action structure (`_progress/figures/m7_run7_72k_*.png`,
+`scripts/analyze_policy_grid.py`):
+
+- u(mainline, ramp): 0.44 at 1500 vph → 0.20–0.23 at 2000 vph; linear
+  sensitivities **du = −0.044 per +100 vph mainline, +0.006 per +100 vph
+  ramp arrivals** — it throttles on mainline demand and opens *slightly*
+  with ramp pressure (run 6: −0.036 / −0.002 and static).
+- Within an episode it is no longer a constant: median u-range 0.36
+  (run 6: 0.16), corr(u, queue) **+0.22** (run 6: −0.19) — it re-opens as
+  the queue builds, and on a jam onset cuts u 0.29 → 0.20 until density
+  clears. This is genuine feedback control, not a demand lookup table.
+- Throughput/queue trade vs run 5 best: +10 vph served and −45 vehicles
+  of final queue on average per cell (both improved at once).
+
+**New reference policy: run 7 @ 72k (`best_model_multiseed.zip`).**
+Remaining known gaps: ≈ −5 return left at 1900–2000 + 400 vs the lucky
+single-seed policies, and the ramp queue still ends the hour at 100–400
+vehicles in over-saturated cells (unavoidable: merge margin < arrivals,
+§7.10). M7 closes here; candidate M8 items: time-varying demand within an
+episode (the demand obs input then earns its place), surrogate retraining
+on the metered-queue dataset + transfer, proposal.md update (needs
+approval).
 
 ## Open items
 

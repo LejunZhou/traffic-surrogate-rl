@@ -65,7 +65,14 @@ def main() -> None:
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     ap.add_argument("--demands", type=float, nargs="+", default=[1500, 1600, 1700, 1800, 1900, 2000])
     ap.add_argument("--ramp-demands", type=float, nargs="+", default=[400, 600, 800])
-    ap.add_argument("--max-breakdowns", type=int, default=3)
+    ap.add_argument("--max-breakdowns", type=int, default=3,
+                    help="cap on density-flagged episodes (rho_max > 60 once). NOTE: this flag also counts "
+                         "transient jams the policy recovers from (M7 §7.15), so --catastrophic-return is "
+                         "the primary feasibility criterion and this cap is only applied as a tie-break "
+                         "when --strict-density is set.")
+    ap.add_argument("--catastrophic-return", type=float, default=-150.0,
+                    help="an episode below this return counts as a failure; feasible = 0 failures")
+    ap.add_argument("--strict-density", action="store_true")
     ap.add_argument("--network-dir", default="data/raw/rl_network_ckpt_select")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -83,22 +90,33 @@ def main() -> None:
                                 args.config, out, network_dir=args.network_dir, quiet=True)
     print_summary(summary)
 
+    rows = [json.loads(l) for l in out.open()]
     ranking = []
     for c in cands:
         s = summary[c["path"]]
-        ranking.append({**c, "grid_mean": s["grid_mean"], "grid_min": s["grid_min"], "breakdowns": s["breakdowns"], "n": s["n"]})
-    feasible = [r for r in ranking if r["breakdowns"] <= args.max_breakdowns]
+        rets = [r["total_reward"] for r in rows if r["policy"] == c["path"]]
+        n_cat = sum(v < args.catastrophic_return for v in rets)
+        ranking.append({**c, "grid_mean": s["grid_mean"], "grid_min": s["grid_min"], "breakdowns": s["breakdowns"],
+                        "n": s["n"], "catastrophic": n_cat})
+    def infeasible(r):
+        bad = r["catastrophic"] > 0
+        if args.strict_density:
+            bad = bad or r["breakdowns"] > args.max_breakdowns
+        return bad
+    feasible = [r for r in ranking if not infeasible(r)]
     pool = feasible or ranking
     best = max(pool, key=lambda r: r["grid_mean"])
-    ranking.sort(key=lambda r: (r["breakdowns"] > args.max_breakdowns, -r["grid_mean"]))
-    print(f"\n== multi-seed ranking (feasible = breakdowns <= {args.max_breakdowns}/{best['n']}) ==")
+    ranking.sort(key=lambda r: (infeasible(r), -r["grid_mean"]))
+    print(f"\n== multi-seed ranking (feasible = no episode < {args.catastrophic_return:.0f}"
+          + (f", density-flag <= {args.max_breakdowns}" if args.strict_density else "") + ") ==")
     for r in ranking:
         flag = "*" if r is best else " "
-        print(f" {flag} step {str(r['step']):>6}  grid mean {r['grid_mean']:7.1f}  min {r['grid_min']:7.1f}  breakdowns {r['breakdowns']:2d}/{r['n']}  det {r['det_mean']:7.1f}")
+        print(f" {flag} step {str(r['step']):>6}  grid mean {r['grid_mean']:7.1f}  min {r['grid_min']:7.1f}  "
+              f"catastrophic {r['catastrophic']:2d}  density-flag {r['breakdowns']:2d}/{r['n']}  det {r['det_mean']:7.1f}")
     dest = args.run_dir / "best_model_multiseed.zip"
     shutil.copy(best["path"], dest)
     (args.run_dir / "eval" / "multiseed_selection.json").write_text(json.dumps({"chosen": best, "ranking": ranking, "seeds": args.seeds,
-                                                                              "max_breakdowns": args.max_breakdowns}, indent=1))
+                                                                              "catastrophic_return": args.catastrophic_return}, indent=1))
     print(f"\nchosen: step {best['step']} -> {dest}  (feasible: {bool(feasible)})")
 
 

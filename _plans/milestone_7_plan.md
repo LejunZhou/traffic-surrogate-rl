@@ -170,7 +170,10 @@ give different traffic (mainline insertion).
   observation (23 features) and weights re-balanced over the grid
   (δ 3.572 / β 1 / γ 0.063). Run 5 done 2026-08-29 (progress §7.12):
   grid mean −70 vs −86 best constant, 3/54 breakdowns; degraded after
-  24k steps (approx_kl 0.11). Next: run 6 with `target_kl 0.02`, lr 1e-4.
+  24k steps (approx_kl 0.11). Run 6 (target_kl) removed the collapse; run 7
+  (+ multi-seed checkpoint selection) delivered the final M7 policy:
+  grid mean −60.7, worst −103, 0 catastrophic episodes, learned jam
+  recovery (progress §7.15). M7 closed 2026-08-30.
 - **Flow surrogate** (second DeepONet trained on the dataset's `flow`
   field, queried at x = 1900 m) so `SurrogateEnv` can run `delta > 0`
   and the surrogate-vs-SUMO comparison is restored on the three-term
