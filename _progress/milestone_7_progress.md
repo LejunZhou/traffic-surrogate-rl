@@ -1335,7 +1335,39 @@ Reading:
    worth the risk under its own exploration noise, and only multi-seed
    selection or a breakdown-aware criterion will prefer the safer policy.
 
-Checkpoint re-scoring: _pending_.
+### Checkpoint re-scoring (`_progress/m7_run6_ckpt_grid_eval.jsonl`, 18 cells × 3 seeds)
+
+| policy | grid mean | grid min | breakdowns | 1500 + 800 | 2000 + 800 (u) |
+|---|---|---|---|---|---|
+| run 6 @ 57.6k (`best_model`) | −70.5 | −199 | 9 / 54 | −65.3 | −197.2, 3/3 (0.22) |
+| run 6 @ 33.6k | **−70.3** | −190 | **3 / 54** | −88.1 | −110.1, 1/3 (0.22) |
+| run 6 @ 28.8k | −73.6 | −226 | 4 / 54 | −93.0 | −116.3, 1/3 (0.27) |
+| run 5 @ 24k (`best_model`) | −70.1 | −151 | 3 / 54 | −95.7 | −74.1, 1/3 (0.23) |
+| constant u = 0.25 | −85.6 | −190 | 3 / 54 | −142.7 | −104.5, 1/3 |
+
+The earlier run-6 checkpoints are as robust as run 5's best (3–4/54,
+all at 1900–2000 vph) but give up run 6's low-demand gains; nothing in
+run 6 dominates run 5. The three robust candidates (run 5 @ 24k, run 6
+@ 33.6k, run 6 @ 28.8k) all sit at ≈ −70 with 3–4 breakdowns, and the
+one policy that is clearly better at 1500–1800 (run 6 @ 57.6k) buys it
+with 2000 + 800 jamming in every seed. The frontier is therefore a
+**selection / robustness** problem at the 2000 vph edge, not a learning
+one below it.
+
+**Verdict for M7 run 6:** the trust-region fix removes the collapse and
+raises the deterministic ceiling (−56 vs −68), but checkpoint selection
+on a single seed per cell is unreliable on edge cells. Keep run 5 @ 24k
+as the reference robust policy (−70.1, 3/54) until a run with multi-seed
+selection exists.
+
+Next-run design (run 7, not launched): run-6 config with checkpoint
+selection on ≥ 3 seeds per cell — cheapest form is post-hoc: keep
+`checkpoint_freq 4800`, single-seed eval during training as a coarse
+signal, then re-score the top ~5 checkpoints with the 3-seed sweep
+(≈ 12 min each) and pick by grid mean subject to breakdowns ≤ 3/54.
+Alternatively a breakdown-aware training signal (e.g. a fixed penalty
+per gridlocked step) would move the policy off the edge by itself; that
+is a reward change and needs the user's decision.
 
 ## Open items
 
