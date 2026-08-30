@@ -1259,7 +1259,83 @@ beat: run 5 `best_model` grid mean −70.1 (3/54 breakdowns) on the
 18 × 3-seed sweep; the hope is that the low-demand cells open up
 (1500 + 800 at −48 instead of −96) without losing the 2000-row throttle.
 
-Results: _pending_.
+### Training curve (finished 2026-08-30 ~01:10, 80k steps + 33 evals)
+
+18-cell deterministic eval mean, cells < −120 in parentheses:
+
+| 2.4k | 4.8k | 7.2k | 9.6k | 12k | 14.4k | 16.8k | 19.2k | 21.6k | 24k | 26.4k | 28.8k | 31.2k | 33.6k | 36k | 38.4k | 40.8k |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| −98 (4) | −90 (2) | −87 (2) | −91 (2) | −92 (3) | −107 (6) | −85 (3) | −81 (3) | −88 (4) | −78 (2) | −74 (1) | −65 (0) | −64 (0) | −67 (0) | −73 (0) | −85 (2) | −78 (1) |
+
+| 43.2k | 45.6k | 48k | 50.4k | 52.8k | 55.2k | **57.6k** | 60k | 62.4k | 64.8k | 67.2k | 69.6k | 72k | 74.4k | 76.8k | 79.2k |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| −74 (1) | −66 (1) | −91 (4) | −72 (1) | −81 (2) | −77 (1) | **−56 (0)** | −93 (4) | −82 (2) | −81 (3) | −81 (2) | −76 (1) | −77 (1) | −74 (2) | −70 (1) |
+
+- **Best −56.1 at 57.6k** (`best_model.zip`), no gridlocked cell, worst
+  cell −103 (1900 + 600); run 5's best was −68.1. Per cell at the best:
+  1500–1800 rows −22 … −70, 1900–2000 rows −55 … −103.
+- **No collapse.** After the best the mean oscillates −70 … −93 with 0–4
+  edge cells tipping per pass and ends at −70 — versus run 5's −112 … −125
+  with 7–8 gridlocked cells. `approx_kl` peaked at 0.062 once (the guard
+  stops the epoch loop only *after* the epoch that overshoots) and
+  averaged 0.010 over the last ten updates; policy std 0.135 → 0.133.
+- Learning order was the same as run 5 (ramp axis first, then the
+  mainline axis), but the lower lr let the low-demand cells open up
+  (1500 + 800: −43 vs −74 in run 5's best; 1600 + 800: −37 vs −80) and
+  the 2000 row still throttles (−55 … −86).
+- Still noisy: one seed per cell per pass, and the 1700–1900 rows sit on
+  the heterogeneity edge, so single cells swing ±40 between passes. The
+  3-seed sweep below is the number to quote.
+
+### Robustness sweep: run-6 best (57.6k) vs run-5 best (24k) vs u = 0.25 — 18 cells × 3 seeds, `speed_dev 0.03`
+
+`_progress/m7_run6_grid_eval.jsonl` / `.summary.json` (mean over seeds; b = breakdown episodes; u = mean action).
+
+| cell | run 6 best (u) | run 5 best (u) | u = 0.25 |
+|---|---|---|---|
+| 1500 + 600 / 800 | **−71.8 / −65.3** (0.42) | −78.3 / −95.7 (0.35) | −112.7 / −142.7 |
+| 1600 + 600 / 800 | **−55.1 / −61.0** (0.39) | −69.9 / −91.8 (0.32) | −95.9 / −125.9 |
+| 1700 + 600 / 800 | **−44.3 / −60.1** (0.35) | −61.5 / −86.6 (0.30) | −79.6 / −109.7 |
+| 1800 + 600 / 800 | **−36.6 / −56.2** (0.33) | −48.7 / −74.1 (0.29) | −63.6 / −93.7 |
+| x + 400 (1600–1900) | −86 / −70 / −54 / −37 | same | same (pass-through cells) |
+| 1900 + 600 | **−34.4** (0.29) | −47.9 | −47.0 |
+| 1900 + 800 | −99.2 ± 68, **b1** (0.27) | −79.8 (0.24) | −77.1 |
+| 2000 + 400 | −65.0 ± 46, **b2** (0.25) | **−26.5** (0.23) | −64.5, b1 |
+| 2000 + 600 | −73.2 ± 39, **b3** (0.24) | −77.2 ± 64, b2 (0.21) | −74.5, b1 |
+| 2000 + 800 | **−197.2, b3** (0.22) | **−74.1**, b1 (0.23) | −104.5, b1 |
+| **grid mean** | **−70.5** | **−70.1** | −85.6 |
+| grid min | −199 | −151 | −190 |
+| **breakdowns** | **9 / 54** | **3 / 54** | 3 / 54 |
+
+Reading:
+
+1. **Run 6 is clearly better everywhere below 1900 vph** — 10–30 return
+   units per cell in the +600/+800 columns (it opens the meter to
+   u ≈ 0.33–0.42 where run 5 stayed at 0.29–0.35), and identical in the
+   +400 pass-through cells.
+2. **It is worse at the top edge.** At 1900–2000 vph it acts ~0.02–0.04
+   higher than run 5 (0.22–0.29 vs 0.21–0.25), which under 3 % driver
+   heterogeneity is enough to gridlock 2000 + 800 in **all three seeds**
+   (−197) and 2000 + 400/600 in 2–3. Net: same grid mean as run 5
+   (−70.5 vs −70.1) with three times the breakdowns (9 vs 3 of 54).
+3. **Why the single-seed eval picked this checkpoint.** In the
+   deterministic 18-cell pass (seed 10000 + pass index) the 2000 + 800
+   episode happened to stay in free flow (−55); with other seeds it jams.
+   The eval that selects `best_model.zip` uses one seed per cell, so on
+   knife-edge cells it rewards luck. Two fixes, both cheap: (a) evaluate
+   with ≥ 3 seeds per cell (`n_eval_episodes 54`; the cycling wrapper
+   already varies the seed per pass), (b) re-score the saved
+   checkpoints (every 4800 steps) with the 3-seed sweep and pick the best
+   *robust* one — running now for the 28.8k and 33.6k checkpoints, whose
+   deterministic evals (−65 / −67, 0 gridlocks) preceded the aggressive
+   late phase.
+4. The trust-region guard did what it was meant to do — no collapse, and
+   the run kept improving until 57.6k — but "no collapse" is not "safe
+   at the edge": PPO's objective sees the deterministic edge cells as
+   worth the risk under its own exploration noise, and only multi-seed
+   selection or a breakdown-aware criterion will prefer the safer policy.
+
+Checkpoint re-scoring: _pending_.
 
 ## Open items
 
