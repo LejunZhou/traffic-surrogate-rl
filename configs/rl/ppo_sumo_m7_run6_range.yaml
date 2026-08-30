@@ -1,0 +1,91 @@
+# M7 run 6 — run 5 setup + trust-region fix, fresh start (2026-08-29).
+# Identical to ppo_sumo_m7_run5_range.yaml (demand grid 1500-2000 x 400/600/800,
+# speed_dev 0.03, 23-dim obs, ramp_discharge_vph 1600, reward 3.572/1/0.063,
+# action_init_u 0.3, 18-cell cycling eval) except:
+#   ppo.target_kl        0.02   -> SB3 early-stops the epoch loop (run 5 collapsed
+#                                  after approx_kl reached 0.11 at 35-44k steps)
+#   ppo.learning_rate    1e-4  (was 3e-4)
+#   training.total_timesteps 80000 (was 60000; ~37 episodes per cell)
+env:
+  type: sumo
+  sumo_config: configs/sumo/phase1_1.yaml
+  demand_levels:
+  - 1500.0
+  - 1600.0
+  - 1700.0
+  - 1800.0
+  - 1900.0
+  - 2000.0
+  ramp_demand_levels:
+  - 400.0
+  - 600.0
+  - 800.0
+  observe_ramp_demand: true
+  density_mean: 18.73
+  density_std: 5.971
+  queue_norm_scale: 100.0
+  reward:
+    delta: 3.572
+    beta: 1.0
+    gamma: 0.063
+    q_ref: 2476.0
+    queue_norm: 400.0
+    sigma_ref: 6.0
+    warmup_s: 90
+  symmetric_action: true
+  sumo_binary: sumo
+  network_dir: data/raw/rl_network
+  sumo_overrides:
+    vehicle:
+      speed_dev: 0.03
+ppo:
+  policy: MlpPolicy
+  policy_kwargs:
+    net_arch:
+      pi:
+      - 512
+      - 512
+      - 512
+      vf:
+      - 512
+      - 512
+      - 512
+    activation_fn: tanh
+    log_std_init: -2.0
+  n_steps: 480
+  batch_size: 120
+  n_epochs: 5
+  learning_rate: 0.0001
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  device: auto
+  verbose: 1
+  target_kl: 0.02
+training:
+  total_timesteps: 80000
+  seed: 42
+  checkpoint_freq: 4800
+  eval_freq: 2400
+  n_eval_episodes: 18
+  action_init_u: 0.3
+  progress_bar: false
+  wandb_info_log_freq: 1000
+  eval_cycle_cells: true
+  eval_seed: 10000
+output:
+  base_dir: runs/rl
+  run_name: ppo_sumo_m7_run6_range
+  wandb:
+    enabled: true
+    project: sumo-to-pde
+    entity: null
+    run_name: ppo_sumo_m7_run6_range
+    tags:
+    - ppo
+    - sumo
+    - phase1_1
+    - m7_outflow_reward

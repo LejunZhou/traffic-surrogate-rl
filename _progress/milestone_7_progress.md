@@ -1245,6 +1245,22 @@ over capacity, so metered-queue samples contain more breakdowns than
 open-loop ones at the same command distribution (density means 19–146 in
 the smoke set) — intended, since that is what an RL flush does.
 
+## 7.14 — Run 6: run-5 setup + trust-region fix, fresh start (launched 2026-08-29 22:40)
+
+`configs/rl/ppo_sumo_m7_run6_range.yaml` = run 5 with `ppo.target_kl 0.02`,
+`ppo.learning_rate 1e-4` (was 3e-4) and `training.total_timesteps 80000`
+(≈ 670 episodes, ≈ 37 per cell). Everything else identical (demand grid,
+`speed_dev 0.03`, 23-dim obs, discharge 1600, reward 3.572/1/0.063,
+`action_init_u 0.3`, 18-cell cycling eval every 2400 steps). Fresh start
+(no warm start from run 5) so the two runs isolate the effect of the
+trust-region guard. Run dir
+`runs/rl/ppo_sumo_m7_run6_range_m7_seed0_20260829_224052`. Reference to
+beat: run 5 `best_model` grid mean −70.1 (3/54 breakdowns) on the
+18 × 3-seed sweep; the hope is that the low-demand cells open up
+(1500 + 800 at −48 instead of −96) without losing the 2000-row throttle.
+
+Results: _pending_.
+
 ## Open items
 
 - ~~Ramp arrival rate not observed~~ — done in §7.11 (`observe_ramp_demand`, obs 22 → 23).
