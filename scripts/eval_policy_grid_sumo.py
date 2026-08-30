@@ -77,6 +77,39 @@ def print_summary(summary: dict) -> None:
     print(f"{'breakdowns':>10} " + " ".join(f"{summary[p]['breakdowns']:>22d}/{summary[p]['n']}" for p in policies))
 
 
+def evaluate_policies(policies, demands, ramp_demands, seeds, config, out, network_dir="data/raw/rl_network_grid_eval",
+                      sumo_overrides=None, quiet=False) -> dict:
+    """Roll every policy through every (mainline, ramp) cell for every seed; write JSONL + summary."""
+    env_cfg = _load_sumo_env_config(overrides={}, config_path=Path(config))
+    env_cfg["network_dir"] = network_dir
+    env_cfg["demand_levels"] = [float(d) for d in demands]
+    env_cfg["ramp_demand_levels"] = [float(r) for r in ramp_demands]
+    apply_sumo_overrides(env_cfg, sumo_overrides)
+    env = SumoEnv(env_cfg)
+    out = Path(out); out.parent.mkdir(parents=True, exist_ok=True)
+    rows: list[dict] = []
+    try:
+        with out.open("w", encoding="utf-8") as f:
+            for policy in policies:
+                for d in demands:
+                    for rp in ramp_demands:
+                        for seed in seeds:
+                            r = rollout_policy_sumo(
+                                policy_arg=str(policy), seed=int(seed), n_episodes=1, config_path=Path(config), env=env,
+                                reset_options={"demand_vph": float(d), "ramp_demand_vph": float(rp), "sumo_seed": int(seed)},
+                            )
+                            r["sumo_seed"] = int(seed)
+                            f.write(json.dumps(r) + "\n"); f.flush(); rows.append(r)
+                            if not quiet:
+                                print(f"  {r['label'][:24]:24s} {d:.0f}+{rp:.0f} seed={seed} return={r['total_reward']:8.1f} "
+                                      f"u={r['action_mean']:.2f} rho_max={r['density_max']:4.0f}", flush=True)
+    finally:
+        env.close()
+    summary = summarize(rows)
+    out.with_suffix(".summary.json").write_text(json.dumps(summary, indent=1))
+    return summary
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Policy evaluation over a demand grid with several SUMO seeds")
     ap.add_argument("--policies", nargs="+", required=True)
@@ -88,35 +121,10 @@ def main() -> None:
     ap.add_argument("--network-dir", default="data/raw/rl_network_grid_eval")
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
-
-    env_cfg = _load_sumo_env_config(overrides={}, config_path=args.config)
-    env_cfg["network_dir"] = args.network_dir
-    env_cfg["demand_levels"] = [float(d) for d in args.demands]
-    env_cfg["ramp_demand_levels"] = [float(r) for r in args.ramp_demands]
-    apply_sumo_overrides(env_cfg, args.sumo_override)
-    env = SumoEnv(env_cfg)
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    rows: list[dict] = []
-    try:
-        with args.out.open("w", encoding="utf-8") as f:
-            for policy in args.policies:
-                for d in args.demands:
-                    for rp in args.ramp_demands:
-                        for seed in args.seeds:
-                            r = rollout_policy_sumo(
-                                policy_arg=policy, seed=seed, n_episodes=1, config_path=args.config, env=env,
-                                reset_options={"demand_vph": float(d), "ramp_demand_vph": float(rp), "sumo_seed": seed},
-                            )
-                            r["sumo_seed"] = seed
-                            f.write(json.dumps(r) + "\n"); f.flush(); rows.append(r)
-                            print(f"  {r['label'][:24]:24s} {d:.0f}+{rp:.0f} seed={seed} return={r['total_reward']:8.1f} "
-                                  f"u={r['action_mean']:.2f} rho_max={r['density_max']:4.0f}", flush=True)
-    finally:
-        env.close()
-    summary = summarize(rows)
+    summary = evaluate_policies(args.policies, args.demands, args.ramp_demands, args.seeds, args.config, args.out,
+                                network_dir=args.network_dir, sumo_overrides=args.sumo_override)
     print_summary(summary)
-    args.out.with_suffix(".summary.json").write_text(json.dumps(summary, indent=1))
-    print(f"\nwrote {len(rows)} episodes to {args.out}")
+    print(f"\nwrote {args.out}")
 
 
 if __name__ == "__main__":

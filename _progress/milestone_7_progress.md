@@ -1369,6 +1369,29 @@ Alternatively a breakdown-aware training signal (e.g. a fixed penalty
 per gridlocked step) would move the policy off the edge by itself; that
 is a reward change and needs the user's decision.
 
+## 7.15 — Run 7: run-6 training + multi-seed checkpoint selection (launched 2026-08-30 11:48)
+
+`configs/rl/ppo_sumo_m7_run7_range.yaml` = run 6 (target_kl 0.02, lr 1e-4,
+80k steps, demand grid, speed_dev 0.03, 23-dim obs) with
+`checkpoint_freq 2400` so every evaluated policy is saved, launched with
+`--seed 1` (run 6 used 0). Selection is post hoc:
+`scripts/select_checkpoint_multiseed.py` ranks checkpoints by the
+single-seed eval (gridlock-free first), re-scores the top-k on 18 cells ×
+3 seeds (`eval_policy_grid_sumo.evaluate_policies`), and picks the best
+grid mean subject to breakdowns ≤ 3/54 → `best_model_multiseed.zip`.
+Analysis: `scripts/analyze_policy_grid.py` (per-cell table, action
+structure u(mainline, ramp) + sensitivities, within-episode u/queue/density
+correlations, breakdown onset/recovery, throughput–queue trade, figures).
+
+Dry run of the analysis on run 6's sweep, for reference: the run-6 policy's
+action depends almost only on mainline demand (du = −0.036 per +100 vph
+mainline, −0.002 per +100 vph ramp arrivals; u 0.42 at 1500 → 0.22–0.25 at
+2000) and varies little within an episode (median range 0.16,
+corr(u, queue) −0.19); none of its 8 breakdown episodes recovered.
+Run dir `runs/rl/ppo_sumo_m7_run7_range_m7_seed1_20260830_114758`.
+
+Results: _pending_.
+
 ## Open items
 
 - ~~Ramp arrival rate not observed~~ — done in §7.11 (`observe_ramp_demand`, obs 22 → 23).
