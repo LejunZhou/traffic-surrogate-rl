@@ -90,8 +90,13 @@ def apply_sumo_overrides(env_cfg: dict, specs: list[str] | None) -> dict:
     return env_cfg
 
 
-def _make_action_callback(policy_arg: str):
-    """Return a function obs -> action for the given policy spec."""
+def _make_action_callback(policy_arg: str, env_cfg: dict | None = None):
+    """Return a callable obs -> action (with optional .reset()) for the policy spec.
+
+    Specs: `u=0.5` (constant), `alinea:ki=35,rho=30,det=14` /
+    `pialinea:kp=4,ki=35,rho=30,det=14` (feedback baselines, see
+    rl.baseline_controllers), or a path to a PPO .zip.
+    """
     if policy_arg.startswith("u="):
         u = float(policy_arg.removeprefix("u="))
         const_action = np.array([u], dtype=np.float32)
@@ -100,6 +105,12 @@ def _make_action_callback(policy_arg: str):
             return const_action
 
         return _const, f"constant u={u:.2f}"
+
+    from rl.baseline_controllers import is_controller_spec, make_controller
+
+    if is_controller_spec(policy_arg):
+        controller = make_controller(policy_arg, env_cfg or {})
+        return controller, controller.label
 
     from stable_baselines3 import PPO
 
@@ -164,12 +175,14 @@ def rollout_policy_sumo(
     own_env = env is None
     if own_env:
         env = SumoEnv(env_cfg)
-    action_fn, label = _make_action_callback(policy_arg)
+    action_fn, label = _make_action_callback(policy_arg, env_cfg)
 
     ep_summaries: list[dict] = []
     try:
         for ep in range(n_episodes):
             obs, _info = env.reset(seed=seed + ep, options=reset_options)
+            if hasattr(action_fn, "reset"):
+                action_fn.reset()  # stateful feedback baselines start fresh per episode
             actions: list[float] = []
             densities: list[np.ndarray] = []
             rewards: list[float] = []
