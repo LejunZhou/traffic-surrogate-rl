@@ -16,3 +16,11 @@ index.
    balance the three terms from a constant-u sweep, retrain SUMO+PPO at
    the current 2800 vph total demand
 8. Comparison study and plots (previously item 7)
+
+## Proposed next phase (2026-09-09)
+`draft_pipeline.md` (repo root) proposes M8–M12: time-varying mainline /
+ramp demand profiles, a plant-model DeepONet (inflows → density + outflow,
+causal branch, ensemble), a budgeted data-aggregation loop, unified PPO
+configs, and a SUMO-episode ledger for the sample-efficiency comparison
+against direct SUMO PPO, ALINEA and a surrogate-based MPC. Per-milestone
+plan files follow once the decisions in its Appendix D are taken.
