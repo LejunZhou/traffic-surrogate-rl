@@ -179,11 +179,21 @@ def main() -> None:
         density=result["density"],
         speed=result["speed"],
         flow=result["flow"],
+        exit_boundary_flow_vph=result["exit_boundary_flow_vph"],
         x_grid=result["x_grid"],
         t_grid=result["t_grid"],
         mainline_demand=result["mainline_demand"],
         ramp_control=result["ramp_control"],
+        ramp_control_cmd=result["ramp_control_cmd"],
+        ramp_inflow_vph=result["ramp_inflow_vph"],
+        ramp_queue=result["ramp_queue"],
+        ramp_departed_count=result["ramp_departed_count"],
+        ramp_pending_count=result["ramp_pending_count"],
         # scalar metadata stored as 0-d arrays
+        ramp_model=np.array(result["metadata"]["ramp_model"]),
+        ramp_ref_vph=np.array(result["metadata"]["ramp_ref_vph"]),
+        ramp_discharge_vph=np.array(result["metadata"]["ramp_discharge_vph"]),
+        ramp_flow_measurement=np.array(result["metadata"]["ramp_flow_measurement"]),
         seed=np.array(result["metadata"]["seed"]),
         mainline_demand_vph=np.array(result["metadata"]["mainline_demand_vph"]),
         ramp_demand_vph=np.array(result["metadata"]["ramp_demand_vph"]),
@@ -212,8 +222,10 @@ def main() -> None:
     print(f"  speed    : mean={result['speed'].mean():.1f}  km/h")
     print(f"  flow     : mean={result['flow'].mean():.0f}  veh/hr")
     print(f"  shape    : density{d.shape}  (N_x × T_ctrl)")
-    print(f"  insertions: {meta['insert_success']}/{meta['insert_attempts']} "
-          f"ok, {meta['insert_rejected']} rejected")
+    print(f"  requests : {meta['insert_success']}/{meta['insert_attempts']} "
+          f"accepted, {meta['insert_rejected']} rejected")
+    print(f"  ramp entries: {meta['ramp_departed_total']} confirmed, "
+          f"{meta['ramp_pending_final']} pending, {meta['ramp_discarded_total']} discarded requests")
     print(f"  teleports : {meta['teleports']}")
     print(f"  ramp queue: max={meta.get('ramp_queue_max', '?')}, "
           f"mean={meta.get('ramp_queue_mean', '?'):.1f}")

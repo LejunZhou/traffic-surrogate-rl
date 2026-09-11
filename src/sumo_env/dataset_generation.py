@@ -17,10 +17,17 @@ Dataset schema (per sample .npz):
     density:             (N_x, T_ctrl)     veh/km — supervised target
     speed:               (N_x, T_ctrl)     km/h   — diagnostic only
     flow:                (N_x, T_ctrl)     veh/hr — diagnostic only
+    exit_boundary_flow_vph: (T_ctrl,)      veh/hr — mean of last 3 detector flows at each timestep
     x_grid:              (N_x,)            detector positions in metres
     t_grid:              (T_ctrl,)         control step timestamps in seconds
     mainline_demand:     (T_ctrl,)         veh/hr (constant in MVP)
-    ramp_control:        (120,)            metering rate ∈ [0, 1]
+    ramp_control:        (T_ctrl,)         confirmed inflow / reference (command in open_loop)
+    ramp_control_cmd:    (T_ctrl,)         requested metering rate ∈ [0, 1]
+    ramp_inflow_vph:     (T_ctrl,)         confirmed ramp entries / interval hours
+    ramp_queue:          (T_ctrl,)         arrivals minus confirmed entries (0 in open_loop)
+    ramp_departed_count: (T_ctrl,)         confirmed ramp entries per interval
+    ramp_pending_count:  (T_ctrl,)         pending ramp requests at interval end (included in metered queue)
+    ramp_flow_measurement: ()              "confirmed_departures"
     seed:                ()                int
     mainline_demand_vph: ()                float
     ramp_demand_vph:     ()                float
@@ -282,6 +289,7 @@ def generate_dataset(
             density=result["density"],
             speed=result["speed"],
             flow=result["flow"],
+            exit_boundary_flow_vph=result["exit_boundary_flow_vph"],
             x_grid=result["x_grid"],
             t_grid=result["t_grid"],
             mainline_demand=result["mainline_demand"],
@@ -289,6 +297,9 @@ def generate_dataset(
             ramp_control_cmd=result["ramp_control_cmd"],
             ramp_inflow_vph=result["ramp_inflow_vph"],
             ramp_queue=result["ramp_queue"],
+            ramp_departed_count=result["ramp_departed_count"],
+            ramp_pending_count=result["ramp_pending_count"],
+            ramp_flow_measurement=np.array(result["metadata"]["ramp_flow_measurement"]),
             ramp_model=np.array(result["metadata"]["ramp_model"]),
             ramp_ref_vph=np.array(result["metadata"]["ramp_ref_vph"]),
             ramp_discharge_vph=np.array(result["metadata"]["ramp_discharge_vph"]),
@@ -317,11 +328,12 @@ def generate_dataset(
         status = "OK" if teleports == 0 else f"TELEPORTS={teleports}"
         inserts = result["metadata"]["insert_success"]
         attempts = result["metadata"]["insert_attempts"]
+        departed = result["metadata"]["ramp_departed_total"]
         print(
             f"  [{i+1:>{len(str(n_samples))}}/{n_samples}] "
             f"demand={int(demand_vph):>4}+{int(ramp_demand_vph):<3}, ctrl={control_type:<20s}, "
             f"inflow_max={result['metadata']['ramp_inflow_max_vph']:4.0f}vph, "
-            f"inserts={inserts}/{attempts}, {status}"
+            f"requests={inserts}/{attempts}, entered={departed}, {status}"
         )
 
     print(f"\n[dataset] Done. {n_samples} samples saved to {raw_dir}")

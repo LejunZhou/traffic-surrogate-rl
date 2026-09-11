@@ -136,6 +136,38 @@ At `ramp_demand_vph = 800` and `dt_ctrl_s = 30 s`, the queue grows by `(1 - u_k)
 
 ### Generating training data on the current SUMO scenario (read before regenerating M2)
 
+Each newly generated rollout `.npz` (from dataset generation or `scripts/run_rollout.py`)
+stores `exit_boundary_flow_vph = flow[-3:, :].mean(axis=0)`: the arithmetic mean
+of the last three detector flows at each control timestep, in veh/h. With the
+current scenario, these detectors are at 1700, 1800, and 1900 m, and the field
+is a float32 array of shape `(120,)` for the 120 thirty-second intervals.
+This uses the existing detector measurements and their measurement caveats;
+the RL reward's separate network-exit count is unchanged. Existing `.npz`
+files can derive the same series from `flow`, but are not updated automatically.
+
+Ramp measurements in newly generated files use SUMO-confirmed road entries
+(`getDepartedIDList`), recorded in the control interval when each entry occurs:
+
+- `ramp_departed_count`: integer number of confirmed ramp entries per interval.
+- `ramp_inflow_vph`: `ramp_departed_count * 3600 / dt_ctrl_s`.
+- `ramp_queue`: upstream arrivals minus confirmed entries, sampled at interval
+  end in `metered_queue` mode; zero in `open_loop` mode.
+- `ramp_pending_count`: accepted ramp requests still waiting for SUMO insertion
+  at interval end. These are already included in `ramp_queue` in metered mode.
+- `ramp_flow_measurement`: the scalar string `"confirmed_departures"`, identifying
+  the corrected measurement convention.
+
+Both `.npz` writers save these fields. Successful `vehicle.add()` calls reserve
+demand but do not reduce the queue or increase measured inflow. Discarded requests
+retain their metered demand for retry. `ramp_control` uses confirmed inflow divided
+by `ramp_ref_vph` in metered mode; `ramp_control_cmd` preserves the requested action.
+SUMO can insert pending requests after the action changes, so measured inflow can
+differ from the current requested release rate. This represents a virtual meter
+at entry to SUMO; the ramp road geometry and RL environment are unchanged.
+Older files without `ramp_flow_measurement` do not establish confirmed entry
+timing. They need regeneration to obtain these measurements; aggregate request
+counts alone cannot reconstruct delayed entries.
+
 The scenario every M7 result uses is `configs/sumo/phase1_1.yaml` on **SUMO 1.27.1**
 (`pip install -e ".[dev,sumo]"` pins it; other SUMO versions insert traffic differently,
 see `_progress/milestone_7_progress.md` §7.1). Dataset generation
