@@ -1,0 +1,34 @@
+# Full dataset (6000 rollouts) for the 2000-vph shockwave surrogate retrain.
+# Same families/params as dataset_2000vph_shockwave_pilot.yaml with larger counts.
+# Running this into the same raw_dir AFTER the pilot only generates the delta
+# (the pilot's per-(family, local_index) files are reused via skip-if-exists).
+# Only run the full set if the pilot retrain shows the surrogate is data-limited.
+
+base_sumo_config: "configs/sumo/phase1_1.yaml"
+
+dataset:
+  base_seed: 42
+  demand_levels:
+    - 2000
+  families:
+    - {name: constant_grid,      count: 21}
+    - {name: bang_bang,          count: 2100,
+       params: {min_dwell: 2, max_switches: 12, max_period: 40, duty: [0.2, 0.8]}}
+    - {name: piecewise_constant, count: 1500,
+       params: {n_seg: [2, 13], level_dist: beta_0.6, min_seg: 2}}
+    - {name: fourier,            count: 1200,
+       params: {n_modes: 5, base: [0.3, 0.7], amplitudes: [0.30, 0.20, 0.13, 0.08, 0.06], gain: [1.0, 2.0]}}
+    - {name: ramp_step,          count: 600,  params: {peak: [0.0, 1.0]}}
+    - {name: smooth,             count: 579,  params: {n_knots: [3, 11], level_dist: beta_0.6}}
+
+splits:
+  train_frac: 0.7
+  val_frac: 0.15
+  test_frac: 0.15
+
+output:
+  raw_dir: "data/raw/shockwave_2000vph"
+  splits_dir: "data/splits/shockwave_2000vph"
+  network_dir: "data/raw/shockwave_2000vph/network"
+  save_heatmaps: true
+  heatmap_every_n: 200

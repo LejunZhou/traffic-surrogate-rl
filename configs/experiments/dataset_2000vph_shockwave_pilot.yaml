@@ -1,0 +1,37 @@
+# Pilot dataset (800 rollouts) for the 2000-vph shockwave surrogate retrain.
+# Family-plan schema (see src/sumo_env/dataset_generation.py). Per-rollout RNG is
+# addressed by (base_seed, family_id, local_index), so these 800 rollouts are a
+# strict subset of the 6000 in dataset_2000vph_shockwave.yaml — running the full
+# config into the same raw_dir later only generates the 5200-rollout delta.
+#
+# Density target uses the occupancy estimator (configs/sumo/phase1_1.yaml:
+# detectors.density_method = "occupancy") — bounded, no q/v congestion blow-up.
+
+base_sumo_config: "configs/sumo/phase1_1.yaml"
+
+dataset:
+  base_seed: 42
+  demand_levels:
+    - 2000
+  families:
+    - {name: constant_grid,      count: 21}                       # u≡linspace(0,1,21): corners + plateaus
+    - {name: bang_bang,          count: 280,                      # sharpest fronts (35%)
+       params: {min_dwell: 2, max_switches: 12, max_period: 40, duty: [0.2, 0.8]}}
+    - {name: piecewise_constant, count: 200,
+       params: {n_seg: [2, 13], level_dist: beta_0.6, min_seg: 2}}
+    - {name: fourier,            count: 160,
+       params: {n_modes: 5, base: [0.3, 0.7], amplitudes: [0.30, 0.20, 0.13, 0.08, 0.06], gain: [1.0, 2.0]}}
+    - {name: ramp_step,          count: 70,  params: {peak: [0.0, 1.0]}}
+    - {name: smooth,             count: 69,  params: {n_knots: [3, 11], level_dist: beta_0.6}}
+
+splits:
+  train_frac: 0.7
+  val_frac: 0.15
+  test_frac: 0.15
+
+output:
+  raw_dir: "data/raw/shockwave_2000vph"
+  splits_dir: "data/splits/shockwave_2000vph"
+  network_dir: "data/raw/shockwave_2000vph/network"
+  save_heatmaps: true
+  heatmap_every_n: 100

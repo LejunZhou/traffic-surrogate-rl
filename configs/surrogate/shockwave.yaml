@@ -1,0 +1,66 @@
+# DeepONet surrogate retrain on the 2000-vph shockwave dataset.
+# Copy of baseline.yaml repointed at the new (occupancy-density, extreme-control)
+# dataset. Use after generating data/raw/shockwave_2000vph (pilot or full).
+
+data:
+  sumo_config: "configs/sumo/phase1_1.yaml"
+
+  raw_dir: "data/raw/shockwave_2000vph"
+  split_index_file: "data/splits/shockwave_2000vph/split_index.json"
+  metadata_file: "data/splits/shockwave_2000vph/metadata.json"
+  constant_mainline_demand_vph: 2000
+
+  n_query_points: 512
+
+  # Padded-prefix (causal) views are RL-style partial-control augmentation, NOT
+  # new operator coverage. With a far larger, more diverse full-control set they
+  # can dilute the full-control shockwave signal — lowered from baseline's 16.
+  # Knob to sweep during the retrain (try 16 / 8 / 4 / 0).
+  control_augmentation:
+    include_full_control: true
+    padded_samples_per_rollout:
+      train: 8
+      val: 0
+      test: 0
+    min_prefix_steps: 1
+    max_prefix_steps:
+    seed: 42
+
+model:
+  branch_input_dim: "auto"
+  trunk_input_dim: 2
+  hidden_dim: 512
+  latent_dim: 512
+
+training:
+  seed: 42
+  device: "auto"
+  # 6000 rollouts → ~37.8k train views/epoch (7.5x the 800 pilot), so the val
+  # minimum arrives far earlier than the pilot's epoch 220 (~epoch 30-80 by
+  # gradient-step equivalence). 150 epochs gives margin; best.pt is on best val.
+  n_epochs: 150
+  batch_size: 16
+  eval_batch_size: 16
+  num_workers: 0
+  lr: 0.001
+  weight_decay: 0.000001
+  grad_clip_norm: 1.0
+  eval_every: 5
+
+evaluation:
+  batch_size: 8
+  max_plots: 30
+  padded_samples_per_rollout: 4
+  include_full_control: true
+  min_prefix_steps: 1
+  max_prefix_steps:
+  seed: 123
+
+output:
+  base_dir: "runs/surrogate"
+  run_name: "deeponet_shockwave_2000vph"
+  wandb:
+    enabled: false
+    project: "sumo-to-pde"
+    entity:
+    run_name: "surrogate-shockwave"
