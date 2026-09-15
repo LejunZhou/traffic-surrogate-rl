@@ -14,8 +14,13 @@
 # sets come from PROFILE_SETS_DIR, the round-0 config is configs/experiments/round0_$SCENARIO.yaml.
 set -e
 cd "$(dirname "$0")/.."
-export PATH="$PWD/.venv-traffic-rl/bin:$PATH"
+# project venv if present (macOS/Linux: bin, Windows Git Bash: Scripts); an already
+# activated conda env (CLAUDE.md) works too — the script only needs python, sumo and
+# netconvert on PATH
+[ -d .venv-traffic-rl/bin ] && export PATH="$PWD/.venv-traffic-rl/bin:$PATH"
+[ -d .venv-traffic-rl/Scripts ] && export PATH="$PWD/.venv-traffic-rl/Scripts:$PATH"
 export PYTHONPATH=src
+command -v sumo >/dev/null 2>&1 || { echo "sumo not on PATH (activate the project env or install eclipse-sumo)"; exit 1; }
 SCENARIO=${SCENARIO:-v3b}
 export SCENARIO_OVERLAY=${SCENARIO_OVERLAY:-configs/rl/env_$SCENARIO.yaml}
 export PROFILE_SETS_DIR=${PROFILE_SETS_DIR:-configs/profiles/v2}
