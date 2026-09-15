@@ -1,0 +1,9 @@
+# Overlay: scenario v3 (M14) for either environment. Apply after ppo_common
+# and the env overlay, e.g.
+#   --config configs/rl/ppo_common.yaml --overlay configs/rl/env_sumo.yaml --overlay configs/rl/env_v3.yaml
+env:
+  sumo_config: configs/sumo/scenario_v3.yaml
+  density_stats_from: data/plant_v3/round0/metadata.json
+  ramp_queue_max_veh: 28
+  ramp_stopline_offset_m: 100.0
+  network_dir: data/raw/rl_network_v3

@@ -1,0 +1,16 @@
+# Overlay: SUMO fine-tuning of a surrogate-trained policy (arm A2, §6.3).
+# Pass --init-policy <selected surrogate checkpoint>.
+env:
+  type: sumo
+  sumo_binary: sumo
+  network_dir: data/raw/rl_network_v2_ft
+ppo:
+  learning_rate: 0.00003
+  target_kl: 0.01
+training:
+  total_timesteps: 12000       # 100 EE (24000 = 200 EE)
+  eval_freq: 2400
+  log_std_reset: -2.0
+  action_init_u: null
+output:
+  run_name: ppo_sumo_finetune_a2

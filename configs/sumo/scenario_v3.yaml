@@ -1,0 +1,58 @@
+# Scenario v3 (M14): scenario v2 with a realistic metered ramp.
+#   - ramp speed limit 60 km/h (v2: 120), ramp 300 m long
+#   - the meter stop line 100 m upstream of the merge nose: released vehicles
+#     are inserted there from standstill (v2: at the ramp start), so they
+#     reach ~60 km/h at the nose and ~100 km/h at the end of the 100 m
+#     acceleration lane
+#   - finite ramp storage: the virtual queue is capped at
+#     (ramp_length - stopline_offset) / (length + minGap) = 200 / 7 = 28
+#     vehicles; when the cap would bind the meter is forced open
+#     (u = max(u_policy, u_min), sumo_env.ramp_queue.queue_override_rate),
+#     identically in SumoEnv and SurrogateVecEnv
+# Everything else (mainline, IDM, detectors, density estimator) is v2.
+
+network:
+  highway_length_m: 2000.0
+  ramp_position_m: 1300.0
+  ramp_length_m: 300.0
+  speed_limit_mps: 33.33
+  ramp_speed_limit_mps: 16.67          # 60 km/h
+  acceleration_lane_length_m: 100.0
+  num_lanes: 1
+
+simulation:
+  duration_s: 3600
+  step_length_s: 1
+  dt_ctrl_s: 30
+  seed: 42
+  sumo_binary: "sumo"
+  max_depart_delay_s: -1
+  sumo_extra_args: ["--extrapolate-departpos"]
+
+demand:
+  mainline_demand_vph: 2000      # grid-mode fallback only
+  ramp_demand_vph: 800           # grid-mode fallback only
+  ramp_discharge_vph: 1600       # meter saturation flow D; u = green fraction of D
+  ramp_model: "metered_queue"
+  demand_profile: "profile"
+  ramp_stopline_offset_m: 100.0  # insertion point, measured back from the merge nose
+  ramp_queue_max_veh: 28         # physical storage between ramp start and stop line
+
+vehicle:
+  idm_tau_s: 1.0
+  depart_speed: "desired"
+  speed_dev: 0.03
+  min_gap_m: 2.0                 # SUMO vType minGap (jam density = 1000 / (5 + 2) = 143 veh/km/lane)
+
+detectors:
+  n_detectors: 19
+  spacing_m: 100.0
+  start_position_m: 100.0
+  vehicle_length_m: 5.0
+  density_method: "occupancy"
+  occupancy_effective_length_m: 5.0
+  jam_density_veh_km: 142.857
+
+output:
+  raw_dir: "data/raw"
+  network_dir: "data/raw/network_v3"

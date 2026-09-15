@@ -1,0 +1,11 @@
+# Overlay: scenario v3b (M14) for either environment. Apply after ppo_common
+# and the env overlay, e.g.
+#   --config configs/rl/ppo_common.yaml --overlay configs/rl/env_sumo.yaml --overlay configs/rl/env_v3b.yaml
+env:
+  sumo_config: configs/sumo/scenario_v3b.yaml
+  density_stats_from: data/plant_v3b/round0/metadata.json
+  ramp_queue_max_veh: null       # no storage cap (v3b decision); the scenario file agrees
+  ramp_stopline_offset_m: 200.0
+  network_dir: data/raw/rl_network_v3b
+  profiles: {family: configs/profiles/family_v2.yaml}
+  eval_profiles: configs/profiles/v2/val.json

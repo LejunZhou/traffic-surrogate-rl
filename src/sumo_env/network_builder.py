@@ -255,7 +255,7 @@ def _run_netconvert(
         )
 
 
-def _write_routes(path: Path, config: dict) -> None:
+def _write_routes(path: Path, config: dict, mainline_blocks: list[tuple[float, float, float]] | None = None) -> None:
     """Write the SUMO routes file with vType, routes, and mainline flow.
 
     The mainline flow uses a deterministic IDM car-following model
@@ -263,6 +263,11 @@ def _write_routes(path: Path, config: dict) -> None:
 
     Ramp vehicles are NOT defined as a flow here; they are inserted
     dynamically via TraCI in run_simulation.py.
+
+    M8: `mainline_blocks` = [(begin_s, end_s, veh/h), ...] writes one
+    <flow> element per block (piecewise-constant, time-varying mainline
+    demand from sumo_env.demand_profiles). Without it the single constant
+    flow of demand.mainline_demand_vph is written, as before.
     """
     net_cfg = config["network"]
     sim_cfg = config["simulation"]
@@ -313,15 +318,25 @@ def _write_routes(path: Path, config: dict) -> None:
         f'    <route id="route_main" edges="{main_edges}"/>\n'
         f'    <route id="route_ramp" edges="{ramp_edges}"/>\n'
         '\n'
-        '    <flow id="mainline_flow"\n'
-        '          type="passenger"\n'
-        '          route="route_main"\n'
-        f'          begin="0" end="{duration}"\n'
-        f'          vehsPerHour="{vph}"\n'
-        f'          departLane="{depart_lane}"\n'
-        f'          departSpeed="{depart_speed}"/>\n'
-        "</routes>\n"
     )
+    if mainline_blocks is None:
+        blocks = [(0.0, float(duration), float(vph))]
+    else:
+        blocks = [(float(b), float(e), float(v)) for b, e, v in mainline_blocks]
+    for i, (begin, end, block_vph) in enumerate(blocks):
+        if block_vph <= 0.0:
+            continue
+        flow_id = "mainline_flow" if mainline_blocks is None else f"mainline_flow_{i:02d}"
+        content += (
+            f'    <flow id="{flow_id}"\n'
+            '          type="passenger"\n'
+            '          route="route_main"\n'
+            f'          begin="{begin:g}" end="{end:g}"\n'
+            f'          vehsPerHour="{block_vph:g}"\n'
+            f'          departLane="{depart_lane}"\n'
+            f'          departSpeed="{depart_speed}"/>\n'
+        )
+    content += "</routes>\n"
     path.write_text(content)
 
 

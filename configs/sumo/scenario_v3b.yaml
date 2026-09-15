@@ -1,0 +1,66 @@
+# Scenario v3b (M14, 2026-09-14): scenario v2 with a metered ramp whose storage is virtual.
+#   - the simulated ramp is only the acceleration segment: 200 m from the
+#     meter stop bar to the merge nose (+ 100 m acceleration lane = 300 m of
+#     acceleration distance), speed limit 120 km/h (user decisions 2026-09-14;
+#     v3 had 300 m at 60 km/h with the bar mid-ramp)
+#   - the meter signal sits at the start of the simulated ramp: released
+#     vehicles are inserted at position 0 from standstill (one vehicle per
+#     green), accelerate over the ramp and the 100 m acceleration lane and
+#     merge between the nose (1300 m) and the zipper lane drop (1400 m)
+#   - the storage section of the ramp is not simulated: the virtual queue
+#     holds the waiting vehicles; no storage cap (user decision 2026-09-14:
+#     the queue is already charged in the TTS reward, so the trade-off is
+#     priced rather than constrained). Set ramp_queue_max_veh to a number to
+#     re-enable the forced-open rule (sumo_env.ramp_queue.queue_override_rate)
+#   - meter discharge D = 1200 veh/h (two vehicles per green; 900 tried first,
+#     progress §9: no storage lever left)
+#   - density at the merge station (1300 m, two loops) = through lane only;
+#     the acceleration-lane loop is ignored (v2/v3 averaged the two lanes)
+# Everything else (mainline, IDM, detectors, density estimator) is v2.
+
+network:
+  highway_length_m: 2000.0
+  ramp_position_m: 1300.0
+  ramp_length_m: 200.0
+  speed_limit_mps: 33.33
+  ramp_speed_limit_mps: 33.33          # 120 km/h (same as the mainline)
+  acceleration_lane_length_m: 100.0
+  num_lanes: 1
+
+simulation:
+  duration_s: 3600
+  step_length_s: 1
+  dt_ctrl_s: 30
+  seed: 42
+  sumo_binary: "sumo"
+  max_depart_delay_s: -1
+  sumo_extra_args: ["--extrapolate-departpos"]
+
+demand:
+  mainline_demand_vph: 2000      # grid-mode fallback only
+  ramp_demand_vph: 800           # grid-mode fallback only
+  ramp_discharge_vph: 1200       # meter saturation flow D (two vehicles per green, ≈ 6 s cycle); u = green fraction of D
+  ramp_model: "metered_queue"
+  demand_profile: "profile"
+  ramp_stopline_offset_m: 200.0  # = ramp length: the stop bar is the start of the simulated ramp
+  ramp_queue_max_veh: null       # no storage cap (a number, e.g. 28, re-enables the forced-open rule)
+
+vehicle:
+  idm_tau_s: 1.0
+  depart_speed: "desired"
+  speed_dev: 0.03
+  min_gap_m: 2.0                 # SUMO vType minGap (jam density = 1000 / (5 + 2) = 143 veh/km/lane)
+
+detectors:
+  n_detectors: 19
+  spacing_m: 100.0
+  start_position_m: 100.0
+  vehicle_length_m: 5.0
+  density_method: "occupancy"
+  merge_station_lanes: "mainline"  # station at the merge nose: through-lane density only (v2/v3: lane-averaged)
+  occupancy_effective_length_m: 5.0
+  jam_density_veh_km: 142.857
+
+output:
+  raw_dir: "data/raw"
+  network_dir: "data/raw/network_v3b"

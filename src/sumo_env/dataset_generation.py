@@ -368,6 +368,154 @@ def _advance_control_rng(
         sample_ramp_control(control_type, T_ctrl, rng)
 
 
+# ── Family-schema generation plan (M8 step 1: brought into the tree) ─────────
+#
+# The shockwave dataset (M3, other machine) used a "family" schema in the
+# experiment config (dataset.families: [{name, count, params}]) whose per-rollout
+# RNG is addressed by (base_seed, family_id, local_index), so any partition of
+# the plan reproduces the same rollouts (scripts/run_parallel_generation.py).
+# Open-loop control families: constant_grid, bang_bang, piecewise_constant,
+# fourier, ramp_step, smooth. Files are named <family>_<local_index:05d>.npz.
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class GenerationSpec:
+    family_id: int
+    name: str
+    local_index: int
+    count: int
+    params: dict
+
+
+def build_generation_plan(families: list[dict]) -> list[GenerationSpec]:
+    plan: list[GenerationSpec] = []
+    for fid, fam in enumerate(families):
+        for j in range(int(fam["count"])):
+            plan.append(GenerationSpec(fid, str(fam["name"]), j, int(fam["count"]), dict(fam.get("params", {}) or {})))
+    return plan
+
+
+def _dist(rng: np.random.Generator, spec, size=None):
+    """Level distribution: [lo, hi] uniform, or 'beta_a' (symmetric Beta(a, a) on [0, 1])."""
+    if isinstance(spec, str) and spec.startswith("beta_"):
+        a = float(spec.split("_", 1)[1])
+        return rng.beta(a, a, size=size)
+    lo, hi = float(spec[0]), float(spec[1])
+    return rng.uniform(lo, hi, size=size)
+
+
+def sample_family_control(spec: GenerationSpec, T_ctrl: int, base_seed: int) -> np.ndarray:
+    rng = np.random.default_rng(np.random.SeedSequence([int(base_seed), spec.family_id, spec.local_index]))
+    prm = spec.params
+    name = spec.name
+    if name == "constant_grid":
+        return np.full(T_ctrl, float(np.linspace(0.0, 1.0, spec.count)[spec.local_index]), dtype=np.float32)
+    if name == "bang_bang":
+        lo, hi = prm.get("duty", [0.2, 0.8])
+        n_sw = int(rng.integers(1, int(prm.get("max_switches", 12)) + 1))
+        min_dwell = int(prm.get("min_dwell", 2)); max_period = int(prm.get("max_period", 40))
+        u_hi = float(rng.uniform(0.6, 1.0)); u_lo = float(rng.uniform(0.0, 0.4))
+        sig = np.empty(T_ctrl, np.float32); k = 0; level = bool(rng.integers(0, 2)); switches = 0
+        while k < T_ctrl:
+            dwell = int(rng.integers(min_dwell, max(min_dwell + 1, max_period)))
+            sig[k:k + dwell] = u_hi if level else u_lo
+            k += dwell; switches += 1
+            if switches < n_sw:
+                level = not level
+        return np.clip(sig, 0, 1)
+    if name == "piecewise_constant":
+        lo, hi = prm.get("n_seg", [2, 13]); n_seg = int(rng.integers(int(lo), int(hi)))
+        min_seg = int(prm.get("min_seg", 2))
+        cuts = np.sort(rng.choice(np.arange(min_seg, T_ctrl - min_seg), size=n_seg - 1, replace=False)) if n_seg > 1 else np.array([], int)
+        levels = _dist(rng, prm.get("level_dist", [0.0, 1.0]), size=n_seg)
+        sig = np.empty(T_ctrl, np.float32); prev = 0
+        for i, c in enumerate(list(cuts) + [T_ctrl]):
+            sig[prev:c] = levels[i]; prev = c
+        return np.clip(sig, 0, 1)
+    if name == "fourier":
+        n_modes = int(prm.get("n_modes", 5)); base = _dist(rng, prm.get("base", [0.3, 0.7]))
+        amps = np.asarray(prm.get("amplitudes", [0.3, 0.2, 0.13, 0.08, 0.06]))[:n_modes]
+        gain = _dist(rng, prm.get("gain", [1.0, 2.0]))
+        t = np.arange(T_ctrl) / T_ctrl
+        sig = base + sum(gain * amps[m] * np.sin(2 * np.pi * (m + 1) * t + rng.uniform(0, 2 * np.pi)) for m in range(n_modes))
+        return np.clip(sig, 0, 1).astype(np.float32)
+    if name == "ramp_step":
+        sig = _sample_ramp_step(T_ctrl, rng)
+        lo, hi = prm.get("peak", [0.3, 1.0])
+        return np.clip(sig * float(rng.uniform(lo, hi)) / max(sig.max(), 1e-6), 0, 1).astype(np.float32)
+    if name == "smooth":
+        lo, hi = prm.get("n_knots", [3, 11]); n_knots = int(rng.integers(int(lo), int(hi)))
+        knots = _dist(rng, prm.get("level_dist", [0.0, 1.0]), size=n_knots)
+        return np.clip(np.interp(np.arange(T_ctrl), np.linspace(0, T_ctrl - 1, n_knots), knots), 0, 1).astype(np.float32)
+    raise ValueError(f"unknown control family {name!r}")
+
+
+def _resolve_network_files(network_dir: Path, base_sumo_config: dict, demand_levels: list, reuse_network: bool = False) -> tuple[dict, str, dict]:
+    """Build (or reuse) the network, detectors and one route file per demand level."""
+    network_dir = Path(network_dir)
+    net_path = network_dir / "net.net.xml"
+    if reuse_network and net_path.exists():
+        network_files = {"net": str(net_path.resolve()), "route": str((network_dir / "routes.rou.xml").resolve())}
+    else:
+        network_files = build_network(str(network_dir), base_sumo_config)
+    det_file = str(network_dir / "detectors.add.xml")
+    if not (reuse_network and Path(det_file).exists()):
+        build_detector_file(det_file, base_sumo_config)
+    from sumo_env.network_builder import _write_routes
+
+    routes = {}
+    for demand_vph in demand_levels:
+        route_path = network_dir / f"routes_{int(demand_vph)}.rou.xml"
+        if not (reuse_network and route_path.exists()):
+            _write_routes(route_path, merge_configs(base_sumo_config, {"demand": {"mainline_demand_vph": float(demand_vph)}}))
+        routes[float(demand_vph)] = str(route_path.resolve())
+    return network_files, det_file, routes
+
+
+def generate_family_dataset(ds_config: dict, project_root: Path, indices: list[int] | None = None,
+                            reuse_network: bool = False, overwrite: bool = False) -> list[Path]:
+    """Family-schema generation (open-loop controls, constant demand cells)."""
+    base_sumo_config = load_config(str(project_root / ds_config["base_sumo_config"]))
+    ds, out = ds_config["dataset"], ds_config["output"]
+    raw_dir = project_root / out["raw_dir"]; raw_dir.mkdir(parents=True, exist_ok=True)
+    network_dir = project_root / out["network_dir"]
+    demand_levels = [float(v) for v in ds.get("demand_levels", [base_sumo_config["demand"]["mainline_demand_vph"]])]
+    ramp_levels = [float(v) for v in ds.get("ramp_demand_levels", [base_sumo_config["demand"]["ramp_demand_vph"]])]
+    base_seed = int(ds.get("base_seed", ds.get("random_seed", 42)))
+    plan = build_generation_plan(ds["families"])
+    network_files, det_file, routes = _resolve_network_files(network_dir, base_sumo_config, demand_levels, reuse_network)
+    sim_cfg = base_sumo_config["simulation"]
+    T_ctrl = int(sim_cfg["duration_s"] / sim_cfg["dt_ctrl_s"])
+    todo = range(len(plan)) if indices is None else [int(i) for i in indices]
+    saved = []
+    for g in todo:
+        spec = plan[g]
+        path = raw_dir / f"{spec.name}_{spec.local_index:05d}.npz"
+        if path.exists() and not overwrite:
+            continue
+        demand_vph = demand_levels[g % len(demand_levels)]
+        ramp_vph = ramp_levels[(g // len(demand_levels)) % len(ramp_levels)]
+        control = sample_family_control(spec, T_ctrl, base_seed)
+        sim_config = merge_configs(base_sumo_config, {"demand": {"mainline_demand_vph": demand_vph, "ramp_demand_vph": ramp_vph},
+                                                      "simulation": {"seed": base_seed + g}})
+        result = run_simulation(network_files["net"], routes[demand_vph], det_file, control, sim_config)
+        np.savez(str(path), density=result["density"], speed=result["speed"], flow=result["flow"],
+                 exit_boundary_flow_vph=result["exit_boundary_flow_vph"], x_grid=result["x_grid"], t_grid=result["t_grid"],
+                 mainline_demand=result["mainline_demand"], ramp_control=result["ramp_control"], ramp_control_cmd=result["ramp_control_cmd"],
+                 ramp_inflow_vph=result["ramp_inflow_vph"], ramp_queue=result["ramp_queue"], ramp_departed_count=result["ramp_departed_count"],
+                 ramp_pending_count=result["ramp_pending_count"], ramp_flow_measurement=np.array(result["metadata"]["ramp_flow_measurement"]),
+                 ramp_model=np.array(result["metadata"]["ramp_model"]), ramp_ref_vph=np.array(result["metadata"]["ramp_ref_vph"]),
+                 ramp_discharge_vph=np.array(result["metadata"]["ramp_discharge_vph"]), seed=np.array(sim_config["simulation"]["seed"]),
+                 mainline_demand_vph=np.array(demand_vph), ramp_demand_vph=np.array(ramp_vph), teleports=np.array(result["metadata"]["teleports"]),
+                 family=np.array(spec.name), family_id=np.array(spec.family_id), local_index=np.array(spec.local_index))
+        saved.append(path)
+        print(f"  [{g:>5}/{len(plan)}] {spec.name:<20s} #{spec.local_index:05d} demand={demand_vph:.0f}+{ramp_vph:.0f} "
+              f"teleports={result['metadata']['teleports']}", flush=True)
+    return saved
+
+
 # ── Train/val/test splits ────────────────────────────────────────────────────
 
 
@@ -376,6 +524,7 @@ def make_splits(
     splits_dir: str,
     config: dict,
     seed: int = 42,
+    stratify_by_family: bool = False,
 ) -> dict:
     """Aggregate raw .npz files and write train/val/test splits.
 
@@ -396,29 +545,30 @@ def make_splits(
     splits_path = Path(splits_dir)
     splits_path.mkdir(parents=True, exist_ok=True)
 
-    # Find all base samples (not truncated)
-    npz_files = sorted(raw_path.glob("sim_[0-9][0-9][0-9][0-9].npz"))
+    # Find all base samples (not truncated): sim_XXXX.npz or <family>_XXXXX.npz
+    npz_files = sorted(raw_path.glob("sim_[0-9][0-9][0-9][0-9].npz")) or sorted(
+        p for p in raw_path.glob("*.npz") if p.stem.rsplit("_", 1)[-1].isdigit()
+    )
     if not npz_files:
         raise FileNotFoundError(f"No sim_*.npz files found in {raw_dir}")
 
     n = len(npz_files)
     rng = np.random.default_rng(seed)
-    indices = rng.permutation(n)
-
     train_frac = config["train_frac"]
     val_frac = config["val_frac"]
-    n_train = int(n * train_frac)
-    n_val = int(n * (train_frac + val_frac)) - n_train
-
-    train_idx = indices[:n_train]
-    val_idx = indices[n_train : n_train + n_val]
-    test_idx = indices[n_train + n_val :]
-
-    splits = {
-        "train": [npz_files[i].name for i in train_idx],
-        "val": [npz_files[i].name for i in val_idx],
-        "test": [npz_files[i].name for i in test_idx],
-    }
+    splits = {"train": [], "val": [], "test": []}
+    groups = {}
+    for i, p in enumerate(npz_files):
+        key = p.stem.rsplit("_", 1)[0] if stratify_by_family else "all"
+        groups.setdefault(key, []).append(i)
+    for key, idx in groups.items():
+        idx = list(rng.permutation(idx))
+        n_g = len(idx)
+        n_train = int(n_g * train_frac)
+        n_val = int(n_g * (train_frac + val_frac)) - n_train
+        splits["train"] += [npz_files[i].name for i in idx[:n_train]]
+        splits["val"] += [npz_files[i].name for i in idx[n_train:n_train + n_val]]
+        splits["test"] += [npz_files[i].name for i in idx[n_train + n_val:]]
 
     # Compute normalization stats from training set only
     train_densities = []
@@ -514,12 +664,24 @@ if __name__ == "__main__":
         action="store_true",
         help="Allow replacing existing sim_*.npz files.",
     )
+    parser.add_argument("--reuse-network", action="store_true", help="family schema: reuse a pre-built network dir")
+    parser.add_argument("--no-splits", action="store_true", help="family schema: skip make_splits (the launcher does it once)")
+    parser.add_argument("--indices-file", default=None, help="family schema: JSON list of global plan indices to generate")
     args = parser.parse_args()
     if args.append and args.start_index is not None:
         parser.error("Use either --append or --start-index, not both.")
 
     config_path = str(_PROJECT_ROOT / args.config)
     ds_cfg = load_config(config_path)
+
+    if "families" in ds_cfg["dataset"]:
+        indices = json.loads(Path(args.indices_file).read_text()) if args.indices_file else None
+        generate_family_dataset(ds_cfg, _PROJECT_ROOT, indices=indices, reuse_network=args.reuse_network, overwrite=args.overwrite)
+        if not args.no_splits:
+            out = ds_cfg["output"]
+            make_splits(str(_PROJECT_ROOT / out["raw_dir"]), str(_PROJECT_ROOT / out["splits_dir"]), ds_cfg["splits"],
+                        seed=int(ds_cfg["dataset"].get("base_seed", 42)), stratify_by_family=True)
+        sys.exit(0)
 
     # Allow CLI override of n_samples for quick smoke tests
     if args.n_samples is not None:

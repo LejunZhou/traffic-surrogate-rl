@@ -86,3 +86,11 @@ Thumbs.db
 
 # ── Local-only reference material ────────────────────────────────────────────
 ref/
+
+# Separate Overleaf repository
+/paper/
+
+# Generated rollout stores (round-0 datasets, E0 characterisations) and the
+# unpacked working copy of the pipeline-figure deck
+data/plant_*/
+.codex-pipeline-figure/

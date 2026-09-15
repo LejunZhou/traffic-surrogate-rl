@@ -1,0 +1,10 @@
+# Overlay: direct PPO in SUMO on the profile family (arm B, run-7 recipe).
+env:
+  type: sumo
+  sumo_binary: sumo
+  network_dir: data/raw/rl_network_v2
+training:
+  total_timesteps: 24000       # 200 EE; 84000 = 700 EE; 240000 = 2000 EE
+  eval_freq: 2400
+output:
+  run_name: ppo_sumo_v2

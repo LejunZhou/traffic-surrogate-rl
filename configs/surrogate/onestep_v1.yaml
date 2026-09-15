@@ -1,0 +1,10 @@
+# One-step autoregressive dynamics model (C4 baseline, draft §9): MLP residual
+# step s_{k+1} = s_k + f(s_k, d_k, q_r,k, k/K), s = (rho, q_out); same rollouts,
+# normalisation and bootstrap ensemble as the DeepONet. Trained by surrogate.onestep.
+data:
+  store_dir: data/plant_v2/round0
+  sumo_config: configs/sumo/scenario_v2.yaml
+model: {hidden: 256, layers: 3}
+ensemble: {members: 5, bootstrap: true}
+training: {n_epochs: 60, lr: 0.001, weight_decay: 0.000001, batch_size: 512, eval_every: 5, seed: 0, num_threads: 2}
+output: {base_dir: runs/surrogate, run_name: onestep_round0}

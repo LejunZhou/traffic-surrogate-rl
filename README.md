@@ -11,6 +11,10 @@ This repository implements a surrogate-accelerated reinforcement learning pipeli
 5. Train PPO in both the surrogate environment and directly in SUMO
 6. Evaluate both policies in SUMO and compare performance
 
+Phase 1 (M1–M7) built these pieces at constant demand. The current phase (M8–M12, next
+section) re-uses them for time-varying demand with a plant-model surrogate, an ensemble
+environment, a data-aggregation loop and a SUMO-episode ledger.
+
 ## Setup
 
 **Option A — self-contained venv (macOS / Linux, no system SUMO needed).** The
@@ -39,6 +43,67 @@ is needed (the `sumo` package resolves it to its own `site-packages/sumo`).
 ```bash
 pip install -e ".[dev]"
 ```
+
+## Surrogate-in-the-loop pipeline (M8–M12, 2026-09-13)
+
+The M8–M12 phase (`draft_pipeline.md`; theory note `theory_analysis.md`; plans `_plans/m8_*` … `m12_*`, progress
+`_progress/m8_*` … `m12_*`) turns the DeepONet into a **plant model** driven by the two
+physical boundary inflows, trains PPO on a batched ensemble surrogate, and closes a
+budgeted data-aggregation loop. Every SUMO rollout is counted in a ledger
+(`runs/ledger/<study>.jsonl`, one line per episode with its purpose).
+
+```
+                SUMO (1 EE / rollout)                        learning (0 EE)
+ profile family ──► scenario v2 ──► rollout store ──► DeepONet ensemble ──► SurrogateVecEnv ──► PPO
+ (family_v1.yaml)   (per-block flows,  (npz: ρ, q_out,   (GRU branch, ρ̂ + q̂,   (16 episodes,        │
+                    occupancy density)  d, r, q_r, Q)      5 bootstrap members)   analytic queue)      │
+                          ▲                 ▲                                                          │
+                          └── top-3 checkpoints × 18 V profiles (54 EE / round) ◄──────────────────────┘
+```
+
+One-command driver (demo budgets on a CPU laptop, ~4 h; paper budgets via env vars):
+
+```bash
+source .venv-traffic-rl/bin/activate; export PYTHONPATH=src
+python src/sumo_env/demand_profiles.py                                   # freeze V / T / O (done, committed)
+python scripts/run_scenario_characterisation.py --workers 8              # E0 (404 EE, reused as data)
+python scripts/generate_round0_dataset.py --target-total 480 --workers 8 # round-0 behaviour mixture
+python scripts/train_ensemble.py --config configs/surrogate/plant_v2.yaml --out-dir runs/surrogate/plant_v2_round0
+python scripts/eval_surrogate_regimes.py --ensemble runs/surrogate/plant_v2_round0 --split val   # round-0 gate
+sh scripts/run_study.sh          # E2 parity, aggregation loop, ALINEA tuning, direct SUMO PPO, A2, MPC,
+                                 # single-surrogate / one-step / anticipative arms, final eval on T and O, figures
+STUDY=paper STEPS_PER_ROUND=1000000 ROUNDS=4 DIRECT_EE="200 700 2000" SEEDS="0 1 2" sh scripts/run_study.sh
+# scenario v3 (M14): 60 km/h ramp, stop line 100 m before the merge, 28-vehicle ramp storage enforced in both envs;
+# add `--overlay configs/rl/env_v3.yaml` to any train_ppo call, or use configs/experiments/round0_v3.yaml for the data stages
+# scenario v3b (M14, current): simulated ramp = 100 m acceleration segment at 120 km/h, meter at its start (D = 900 veh/h),
+# uncapped virtual queue priced by the TTS reward, merge-station density from the through lane only;
+# demand family v2 (configs/profiles/family_v2.yaml, frozen sets configs/profiles/v2/: all peaks/surges over by minute 45, surge <= 600 veh/h);
+# overlay configs/rl/env_v3b.yaml, data config configs/experiments/round0_v3b.yaml; layout figure _progress/figures/m14_v3b_road_layout.png
+sh scripts/run_m13.sh            # M13: how small can round 0 be? 240-rollout stores (original vs closed-loop-heavy
+                                 # mixture, no run-7 policy) + aggregation until the stop rule; figures in _progress/figures/m13
+```
+
+Individual stages: `python -m rl.train_ppo --config configs/rl/ppo_common.yaml --overlay configs/rl/env_surrogate.yaml`
+(or `env_sumo.yaml`, `env_sumo_finetune.yaml --init-policy <zip>`), `scripts/run_aggregation_loop.py`,
+`scripts/eval_policy_profiles_sumo.py --policies <zip|u=0.3|alinea:...|mpc:<ensemble_dir>> --set test`,
+`scripts/reward_parity_check.py`, `scripts/run_e1_surrogate_study.py`, `scripts/plot_sample_efficiency.py`.
+
+Key decisions made while building it (details and numbers in the progress files):
+
+- **Time-varying demand** on 5-min blocks from a seeded family (`configs/profiles/family_v1.yaml`);
+  frozen validation (18), test (30 × 3 seeds) and OOD (12 × 3) sets in `configs/profiles/`.
+- **Scenario v2** (`configs/sumo/scenario_v2.yaml`): the M7 geometry with `speed_dev` 0.03 and a
+  bounded occupancy density estimator (ρ = occ·1000/5 m per lane, clipped at 143 veh/km/lane,
+  lane-averaged) used by both the surrogate target and the RL observation.
+- **Reward form.** E0 showed that the M7 three-term reward cannot see the delay a merge breakdown
+  causes (no dynamic schedule beat a constant under it although TTS drops by 20–65 veh h), so the
+  primary training reward is total time spent per step, r_k = −(N_k + Q_k + P_k)·Δt/3600
+  (vehicles on the mainline + ramp queue + conservation-estimated backlog; `reward.form: tts`),
+  identical in both environments. The three-term form is the "old reward" ablation.
+- **Plant model.** Branch input (2, K) = [d/2500, q_r/1600]; a 2-layer GRU read-out (the dilated
+  causal conv of the draft is 20× slower on CPU and kept as the ablation); trunk 3 × 512 split into
+  density and flow halves; band-weighted MSE + exit-flow MSE; 5 bootstrap members.
+- **SurrogateVecEnv** never sees the action: u → released inflow through the analytic queue → branch history.
 
 ## Repository structure
 

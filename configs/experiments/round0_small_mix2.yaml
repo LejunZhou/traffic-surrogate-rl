@@ -1,0 +1,41 @@
+# M13 round-0 arm "mix2": 240 rollouts, closed-loop-heavy mixture (wide
+# ALINEA family, dithered ALINEA, randomly initialised PPO actors) plus the
+# open-loop schedules that stand in for the TTS-optimal storage behaviour;
+# half the profiles forced to be storage-mandatory (peak total > 2500 vph).
+env:
+  sumo_config: configs/sumo/scenario_v2.yaml
+  profiles: {family: configs/profiles/family_v1.yaml}
+  density_mean: 20.0
+  density_std: 12.0
+  queue_norm_scale: 100.0
+  observation: {lookahead_steps: 0}
+  reward:            # only used to log returns of the behaviour rollouts
+    delta: 3.572
+    beta: 1.0
+    gamma: 0.063
+    q_ref: 2476.0
+    q_ref_mode: offered
+    q_cap: 2476.0
+    queue_norm: 400.0
+    sigma_ref: 6.0
+    warmup_s: 90
+dataset:
+  n_rollouts: 240
+  seed: 13
+  sumo_seed_base: 61000
+  per_entry_seeds: true
+  storage_mandatory_frac: 0.5
+  storage_mandatory_vph: 2500
+  mixture:                       # explicit feedforward share: no store_flush fold
+    alinea_wide: 0.35
+    alinea_dither: 0.15
+    random_policy: 0.10
+    store_flush: 0.10
+    feedforward: 0.05
+    random_signal: 0.15
+    constant: 0.10
+splits: {train_frac: 0.7, val_frac: 0.15, seed: 0}
+output:
+  store_dir: data/plant_v2/round0_s240_mix2
+  network_dir: data/plant_v2/network
+  workers: 8

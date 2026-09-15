@@ -1,0 +1,56 @@
+# Scenario v2 (M8): the M7 geometry and insertion settings of phase1_1.yaml
+# with (a) time-varying demand supplied per episode by sumo_env.demand_profiles
+# (the demand block below is only the fallback for grid mode), (b) the bounded
+# occupancy density estimator used by both the plant-model surrogate and the
+# RL observation (D9), and (c) the 3 % driver-speed spread (speed_dev 0.03)
+# that makes the SUMO seed matter. Every M8+ SUMO rollout uses this file.
+
+network:
+  highway_length_m: 2000.0
+  ramp_position_m: 1300.0
+  ramp_length_m: 200.0
+  speed_limit_mps: 33.33
+  ramp_speed_limit_mps: 33.33
+  acceleration_lane_length_m: 100.0
+  num_lanes: 1
+
+simulation:
+  duration_s: 3600
+  step_length_s: 1
+  dt_ctrl_s: 30
+  seed: 42
+  sumo_binary: "sumo"
+  max_depart_delay_s: -1
+  sumo_extra_args: ["--extrapolate-departpos"]
+
+demand:
+  mainline_demand_vph: 2000      # grid-mode fallback only
+  ramp_demand_vph: 800           # grid-mode fallback only
+  ramp_discharge_vph: 1600       # meter saturation flow D; u = green fraction of D
+  ramp_model: "metered_queue"
+  demand_profile: "profile"
+
+vehicle:
+  idm_tau_s: 1.0
+  depart_speed: "desired"
+  speed_dev: 0.03
+  min_gap_m: 2.0                 # SUMO vType minGap (jam density = 1000 / (5 + 2) = 143 veh/km/lane)
+
+detectors:
+  n_detectors: 19
+  spacing_m: 100.0
+  start_position_m: 100.0
+  vehicle_length_m: 5.0
+  # Occupancy estimator: rho = occ * 1000 / occupancy_effective_length_m per
+  # lane, clipped at jam_density_veh_km, lane-averaged on the accel segment.
+  # The draft's "l + minGap = 7 m" divisor under-estimates moving traffic by
+  # 5/7 (a point loop is occupied for l_veh / v, not (l + minGap) / v); the
+  # 5 m divisor is unbiased in moving traffic and the clip bounds a standstill
+  # (occupancy 100 %) at the physical jam density.
+  density_method: "occupancy"
+  occupancy_effective_length_m: 5.0
+  jam_density_veh_km: 142.857
+
+output:
+  raw_dir: "data/raw"
+  network_dir: "data/raw/network_v2"

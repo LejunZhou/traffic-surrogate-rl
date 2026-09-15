@@ -1,0 +1,10 @@
+# Overlay: the M7 three-term reward (E7 "old reward" ablation).
+#   r_k = -delta max(0, q_ref,k - q_out,k)/q_ref,k - beta (Q_k/queue_norm)^2 - gamma std(rho_k)/sigma_ref
+# Weights: M7 grid balance (delta 3.572 / beta 1 / gamma 0.063); the TTS-fitted
+# alternative from the E0 sweeps is delta 0.805 / beta 1 / gamma 0.106
+# (_progress/m8_scenario_v2_progress.md, R^2 0.89 against TTS).
+env:
+  reward:
+    form: three_term
+output:
+  run_name: ppo_three_term

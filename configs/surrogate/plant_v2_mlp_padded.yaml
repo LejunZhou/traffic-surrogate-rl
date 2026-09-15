@@ -1,0 +1,39 @@
+# Plant-model DeepONet v2 (M9, draft_pipeline.md §5, Appendix B).
+# G: (d(.), q_r(.)) -> (rho(x, t), q(x, t)); causal branch, two-channel trunk,
+# ensemble of bootstrap members. Trained by surrogate.train_plant (one member
+# per process; scripts/train_ensemble.py launches all members).
+data:
+  store_dir: data/plant_v2/round0
+  sumo_config: configs/sumo/scenario_v2.yaml
+  n_query_points: 512          # density queries per rollout per epoch
+  mode: padded                 # MLP-branch ablation (draft D4 branch B)
+  padded_views_per_rollout: 4
+  band: {rho_min: 40.0, x_max_m: 1400.0, weight: 2.0}   # extra weight in the shockwave band
+  outflow_weight: 1.0          # lambda_q on the exit-flow MSE
+  normalisers: {mainline_demand: 2500.0, ramp_inflow: 1600.0, flow: 2500.0}
+model:
+  # CPU benchmark (2026-09-13, batch 16 x K 120): dilated causal conv 128 ch =
+  # 120 ms per forward vs GRU 128 x 2 = 5 ms with the same latent width, and
+  # the GRU steps incrementally (0.06 ms) — so the GRU is the default branch
+  # here and the conv stack is the ablation (configs/surrogate/plant_v2_conv.yaml).
+  branch: {type: mlp_padded, hidden: 512, latent_dim: 256}
+  trunk: {hidden_dim: 512, layers: 3, latent_dim: 256, fourier_features: 0}
+ensemble: {members: 5, bootstrap: true}
+training:
+  n_epochs: 150
+  lr: 0.001
+  schedule: cosine
+  warmup_epochs: 5
+  weight_decay: 0.000001
+  batch_size: 16
+  grad_clip_norm: 1.0
+  eval_every: 5
+  seed: 0
+  num_threads: 2               # per member process (5 members in parallel on a 10-core CPU)
+  select_on: val_rel_l2        # density rel-L2 + exit-flow rel-L2
+finetune:                      # aggregation rounds: resume every member on the enlarged split
+  epochs: 20
+  lr: 0.0003
+output:
+  base_dir: runs/surrogate
+  run_name: plant_v2_mlp_padded_round0

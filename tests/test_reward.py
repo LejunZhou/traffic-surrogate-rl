@@ -97,3 +97,65 @@ def test_input_validation():
         RewardWeights(q_ref=0.0)
     with pytest.raises(ValueError):
         RewardWeights(delta=-1.0)
+
+
+# ── M8 additions: offered reference, terminal cost, TTS form ──────────────
+
+def test_offered_q_ref_modes():
+    from rl.reward import offered_q_ref
+
+    w = RewardWeights(q_ref=2476.0, q_ref_mode="offered", q_cap=2476.0)
+    assert offered_q_ref(w, 1500.0, 400.0, 0.0, 1600.0, 30.0) == pytest.approx(1900.0)
+    # backlog of 10 vehicles adds min(10 * 120, D - r) = 1200 -> capped at q_cap
+    assert offered_q_ref(w, 1500.0, 400.0, 10.0, 1600.0, 30.0) == pytest.approx(2476.0)
+    assert offered_q_ref(RewardWeights(q_ref=2476.0), 1500.0, 400.0, 50.0) == pytest.approx(2476.0)
+    with pytest.raises(ValueError):
+        RewardWeights(q_ref_mode="bogus")
+
+
+def test_terminal_queue_cost_only_on_terminal_step():
+    rho = np.full(19, 20.0, dtype=np.float32)
+    w = RewardWeights(delta=1.0, beta=1.0, gamma=0.0, q_ref=2000.0, queue_norm=100.0, terminal_queue_weight=2.0)
+    a = reward_terms(rho, 50.0, 2000.0, w, terminal=False)
+    b = reward_terms(rho, 50.0, 2000.0, w, terminal=True)
+    assert a["terminal_penalty"] == 0.0 and b["terminal_penalty"] == pytest.approx(2.0 * 0.25)
+    assert b["reward"] == pytest.approx(a["reward"] - 0.5)
+
+
+def test_tts_form_and_backlog_estimate():
+    from rl.reward import backlog_estimate
+
+    rho = np.full(19, 20.0, dtype=np.float32)          # 20 veh/km x 19 x 0.1 km = 38 vehicles on the road
+    w = RewardWeights.from_config({"form": "tts", "tts_scale": 1.0, "dx_km": 0.1})
+    t = reward_terms(rho, 12.0, 1800.0, w, backlog_veh=50.0, dt_ctrl_s=30.0)
+    assert t["on_road_veh"] == pytest.approx(38.0)
+    assert t["tts_step_veh_h"] == pytest.approx((38.0 + 12.0 + 50.0) * 30.0 / 3600.0)
+    assert t["reward"] == pytest.approx(-t["tts_step_veh_h"])
+    # three-term components are still reported (for parity logs) but do not enter the reward
+    assert t["queue_penalty"] > 0.0
+    assert backlog_estimate(100.0, 40.0, 38.0, 12.0) == pytest.approx(10.0)
+    assert backlog_estimate(100.0, 90.0, 38.0, 12.0) == 0.0
+    # an hour at 38 vehicles on the road, no queue, no backlog = 38 veh h
+    total = sum(reward_terms(rho, 0.0, 2000.0, w)["reward"] for _ in range(120))
+    assert total == pytest.approx(-38.0)
+
+
+def test_rescore_return_matches_step_sum():
+    from sumo_env.rollout import rescore_return
+
+    K, Nx = 120, 19
+    rng = np.random.default_rng(0)
+    arrays = {"density": rng.uniform(5, 40, (Nx, K)).astype(np.float32), "outflow_vph": np.full(K, 1800.0, np.float32),
+              "ramp_queue": np.linspace(0, 30, K).astype(np.float32), "mainline_demand": np.full(K, 1500.0, np.float32),
+              "ramp_arrival": np.full(K, 400.0, np.float32), "q_ref": np.full(K, 1900.0, np.float32)}
+    w = RewardWeights.from_config({"form": "tts"})
+    r = rescore_return(arrays, w, warmup_s=90.0)
+    # manual: skip the first 3 steps, cumulative conservation backlog
+    tot = 0.0; off = srv = 0.0
+    for k in range(K):
+        off += 1900 * 30 / 3600; srv += 1800 * 30 / 3600
+        on_road = arrays["density"][:, k].sum() * 0.1
+        bl = max(off - srv - on_road - arrays["ramp_queue"][k], 0.0)
+        if k >= 3:
+            tot -= (on_road + arrays["ramp_queue"][k] + bl) * 30 / 3600
+    assert r["return"] == pytest.approx(tot, rel=1e-5)

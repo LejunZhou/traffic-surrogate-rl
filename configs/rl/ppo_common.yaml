@@ -1,0 +1,73 @@
+# One PPO configuration for both environments (M10, draft_pipeline.md §7.4, D8).
+# Use with an environment overlay:
+#   PYTHONPATH=src python -m rl.train_ppo --config configs/rl/ppo_common.yaml --overlay configs/rl/env_surrogate.yaml
+#   PYTHONPATH=src python -m rl.train_ppo --config configs/rl/ppo_common.yaml --overlay configs/rl/env_sumo.yaml
+# The overlay sets env.type and the environment-specific keys only; the
+# observation layout, reward, queue, action box and PPO hyper-parameters
+# below are shared, so the environment is the only difference between arms.
+env:
+  sumo_config: configs/sumo/scenario_v2.yaml
+  profiles: {family: configs/profiles/family_v1.yaml}
+  observation: {lookahead_steps: 0, demand_norm: 2500.0, ramp_norm: 1000.0, clip: [-3.0, 25.0]}
+  observe_ramp_demand: true
+  # z-score statistics of the occupancy density, shared by both envs:
+  # 'auto' = the ensemble manifest (surrogate) or env.density_stats_from (SUMO)
+  density_mean: auto
+  density_std: auto
+  density_stats_from: data/plant_v2/round0/metadata.json
+  queue_norm_scale: 100.0
+  ramp_discharge_vph: 1600.0
+  symmetric_action: true
+  reward:
+    # Primary training reward (M8 E0 finding): total time spent per step,
+    # r_k = -(N_k + Q_k + P_k) dt / 3600 [veh h]; episode return = -TTS.
+    # The M7 three-term form is kept as the "old reward" ablation
+    # (configs/rl/reward_three_term.yaml overlay); its keys below are the
+    # re-balanced values for the profile family and are ignored by form: tts
+    # except q_ref/q_ref_mode, which still feed the logged outflow term.
+    form: tts
+    tts_scale: 1.0
+    dx_km: 0.1
+    delta: 3.572
+    beta: 1.0
+    gamma: 0.063
+    q_ref: 2476.0
+    q_ref_mode: offered       # D10: q_ref_k = min(d_k + r_k + drain_k, q_cap)
+    q_cap: 2476.0
+    queue_norm: 400.0
+    sigma_ref: 6.0
+    warmup_s: 90
+    terminal_queue_weight: 0.0
+ppo:
+  policy: MlpPolicy
+  policy_kwargs:
+    net_arch: {pi: [512, 512, 512], vf: [512, 512, 512]}
+    activation_fn: tanh
+    log_std_init: -2.0
+  n_steps: 480
+  batch_size: 120
+  n_epochs: 5
+  learning_rate: 0.0001
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: 0.02
+  device: cpu
+  verbose: 1
+training:
+  seed: 0
+  total_timesteps: 1000000      # overlay overrides (SUMO arms are budgeted in episodes)
+  eval_freq: 24000              # env steps between evaluation passes (overlay overrides)
+  checkpoint_every_eval: true   # one checkpoint per evaluation pass (post-hoc selection)
+  eval_profiles: configs/profiles/val.json
+  eval_seed: 10000
+  action_init_u: 0.3
+  progress_bar: false
+  wandb_info_log_freq: 1000
+output:
+  base_dir: runs/rl
+  run_name: ppo_common
+  wandb: {enabled: false, project: sumo-to-pde, entity: null, run_name: null, tags: [ppo, m10]}

@@ -9,15 +9,30 @@ Ramp demand is tracked as a virtual unmet-demand queue. The metering action
 controls release attempts from that queue into SUMO; physical ramp-edge
 occupancy is reported separately.
 
-Observation (shape (N_x + 3,); 22 features for N_x=19; +1 ramp-arrival feature
-when env.observe_ramp_demand is true, inserted after `demand`):
-    density[0:N_x]  — z-score normalized density at detector locations
-    demand[N_x]     — min-max normalized current mainline demand in [0, 1]
-    time[N_x+1]     — normalized control index k / T_ctrl in [0, 1]
-    queue[N_x+2]    — virtual ramp queue length normalized by queue_scale
+Two demand modes (M8, draft_pipeline.md §4):
 
-Action (shape (1,)):
-    ramp metering rate in [0, 1] (continuous Box)
+* legacy grid mode (default): a constant mainline demand drawn from
+  env.demand_levels and a constant ramp arrival rate from
+  env.ramp_demand_levels per episode; min-max normalised demand features
+  (22 / 23-dim observation, as run 7).
+* profile mode (env.profiles set): every episode gets a time-varying
+  DemandProfile (d_k, r_k on 5-min blocks) either resampled from the family
+  YAML or taken from a frozen set JSON. Routes are written per episode with
+  one <flow> per block; ramp arrivals follow r_k per sub-step. Observation
+  normalisers are fixed constants (d / 2500, r / 1000), z-scores are clipped
+  and an optional demand look-ahead is appended:
+
+      [ rho_1..rho_Nx (z-scored) | d_k / 2500 | r_k / 1000
+        | d_{k+1..k+H} / 2500, r_{k+1..k+H} / 1000   (H = observation.lookahead_steps)
+        | k / K | Q_k / queue_scale ]
+
+Density estimator (detectors.density_method in the SUMO config):
+  "qv"        flow / speed with an occupancy fallback below 5 km/h (legacy)
+  "occupancy" rho = occ * 1000 / l_eff per lane, clipped at the jam density
+              1000 / (length + minGap); at the merge station (two loops) the
+              lanes are averaged (detectors.merge_station_lanes "mean", v2/v3)
+              or only the through lane is used ("mainline", v3b). This is the
+              estimator the plant-model surrogate is trained on.
 """
 
 from __future__ import annotations
@@ -40,10 +55,51 @@ except ImportError as exc:
         "export PYTHONPATH=$SUMO_HOME/share/sumo/tools:$PYTHONPATH"
     ) from exc
 
-from rl.reward import RewardWeights, reward_terms as compute_reward_terms
+from rl.reward import RewardWeights, backlog_estimate, offered_q_ref, reward_terms as compute_reward_terms
+from sumo_env.demand_profiles import DemandProfile, resolve_profile_source
 from sumo_env.detectors import build_detector_file, get_detector_ids_per_lane, get_x_grid
 from sumo_env.network_builder import build_network, _write_routes
+from sumo_env.ramp_queue import queue_override_rate
 from utils.config import load_config, merge_configs
+
+
+def density_from_loops(
+    sum_count: np.ndarray, sum_speed: np.ndarray, speed_count: np.ndarray,
+    sum_occ_per_lane: list[np.ndarray], n_substeps: int, step_len: float,
+    method: str, vehicle_length_m: float, effective_length_m: float, jam_density: float,
+    merge_station_lanes: str = "mean",
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Aggregate one control interval of E1 readings into (density, speed, flow).
+
+    sum_count / sum_speed / speed_count are summed over lanes and sub-steps;
+    sum_occ_per_lane[j] holds the per-lane occupancy sums (%) at position j.
+    merge_station_lanes (occupancy method, stations with more than one loop, i.e.
+    the merge station on the acceleration edge where lane 0 is the ramp lane):
+      "mean"      lane-averaged density (v2/v3 stores)
+      "mainline"  density of the through lane(s) only, lane 0 dropped (v3b)
+    """
+    if merge_station_lanes not in ("mean", "mainline"):
+        raise ValueError(f"unknown merge_station_lanes {merge_station_lanes!r} (expected 'mean' or 'mainline')")
+    flow_vph = sum_count / (n_substeps * step_len) * 3600.0
+    mean_speed_mps = np.where(speed_count > 0, sum_speed / np.maximum(speed_count, 1), 0.0)
+    mean_speed_kmph = mean_speed_mps * 3.6
+    if method == "occupancy":
+        dens = np.zeros(len(sum_occ_per_lane), dtype=np.float64)
+        for j, occ_lanes in enumerate(sum_occ_per_lane):
+            occ_frac = np.asarray(occ_lanes, dtype=np.float64) / (n_substeps * 100.0)
+            per_lane = np.minimum(occ_frac * (1000.0 / effective_length_m), jam_density)
+            if merge_station_lanes == "mainline" and per_lane.shape[0] > 1:
+                per_lane = per_lane[1:]          # lane 0 is the ramp / acceleration lane
+            dens[j] = float(np.mean(per_lane))
+        density = dens
+    elif method == "qv":
+        sum_occ = np.asarray([float(np.sum(o)) for o in sum_occ_per_lane], dtype=np.float64)
+        mean_occ_frac = sum_occ / (n_substeps * 100.0)
+        density_occ = mean_occ_frac * (1000.0 / vehicle_length_m)
+        density = np.where(mean_speed_kmph > 5.0, flow_vph / np.maximum(mean_speed_kmph, 1e-6), density_occ)
+    else:
+        raise ValueError(f"unknown density_method {method!r} (expected 'qv' or 'occupancy')")
+    return density.astype(np.float32), mean_speed_kmph.astype(np.float32), flow_vph.astype(np.float32)
 
 
 class SumoEnv(gym.Env):
@@ -60,7 +116,7 @@ class SumoEnv(gym.Env):
         """
         Args:
             config: SUMO RL environment config. Usually this is the ``env``
-                    section from configs/rl/ppo_sumo.yaml.
+                    section from a PPO config (configs/rl/*.yaml).
         """
         super().__init__()
         self.env_config = copy.deepcopy(config)
@@ -120,6 +176,20 @@ class SumoEnv(gym.Env):
         )
         if not np.isfinite(self.ramp_discharge_vph) or self.ramp_discharge_vph <= 0.0:
             raise ValueError(f"ramp_discharge_vph must be positive, got {self.ramp_discharge_vph}")
+        # M14 (scenario v3): finite ramp storage and the meter stop line.
+        # ramp_queue_max_veh: cap on the virtual queue; when it would bind, the
+        # meter is forced open (u = max(u_policy, u_min)) — identical rule in
+        # SurrogateVecEnv. None / 0 = unlimited (v2 behaviour).
+        # ramp_stopline_offset_m: released vehicles are inserted this far
+        # upstream of the merge nose (0 = at the ramp start, v2 behaviour).
+        _qmax = self.env_config.get("ramp_queue_max_veh", demand_cfg.get("ramp_queue_max_veh"))
+        self.ramp_queue_max_veh = float(_qmax) if _qmax else None
+        self.ramp_stopline_offset_m = float(
+            self.env_config.get("ramp_stopline_offset_m", demand_cfg.get("ramp_stopline_offset_m", 0.0)) or 0.0
+        )
+        self._ramp_depart_pos: str | None = None
+        self._queue_override_steps = 0
+        self._queue_cap_exceeded_steps = 0
         # Per-episode ramp arrival rate, sampled like demand_levels at reset()
         # (or forced via reset(options={"ramp_demand_vph": ...})).
         self.ramp_demand_levels = [
@@ -130,11 +200,19 @@ class SumoEnv(gym.Env):
         self.current_ramp_demand_vph = float(self.ramp_demand_levels[0])
         self.min_ramp_demand = float(min(self.ramp_demand_levels))
         self.max_ramp_demand = float(max(self.ramp_demand_levels))
-        # Append the (min-max normalised) ramp arrival rate to the observation.
-        # Off by default so pre-§7.10 policies keep their 22-dim input; on in
-        # the training configs, where ramp_demand_levels varies per episode.
-        self.observe_ramp_demand = bool(self.env_config.get("observe_ramp_demand", False))
         self.vehicle_length_m = float(det_cfg["vehicle_length_m"])
+        # Density estimator (see module docstring).
+        self.density_method = str(det_cfg.get("density_method", "qv")).lower()
+        self.min_gap_m = float(self.sumo_config.get("vehicle", {}).get("min_gap_m", 2.0))
+        self.merge_station_lanes = str(det_cfg.get("merge_station_lanes", "mean")).lower()
+        if self.merge_station_lanes not in ("mean", "mainline"):
+            raise ValueError("detectors.merge_station_lanes must be 'mean' or 'mainline'")
+        self.occupancy_effective_length_m = float(
+            det_cfg.get("occupancy_effective_length_m", self.vehicle_length_m)
+        )
+        self.jam_density_veh_km = float(
+            det_cfg.get("jam_density_veh_km", 1000.0 / (self.vehicle_length_m + self.min_gap_m))
+        )
 
         self.demand_levels = [
             float(v)
@@ -147,6 +225,32 @@ class SumoEnv(gym.Env):
         self.min_demand = float(min(self.demand_levels))
         self.max_demand = float(max(self.demand_levels))
 
+        # ---- profile mode (M8) ------------------------------------------
+        self.profile_family, self.profile_set = resolve_profile_source(
+            self.env_config.get("profiles"), self.project_root, dt_ctrl_s=self.dt_ctrl
+        )
+        self.profile_mode = self.profile_family is not None or self.profile_set is not None
+        self._profile_cursor = 0
+        self.current_profile: DemandProfile | None = None
+        obs_cfg = dict(self.env_config.get("observation", {}) or {})
+        self.lookahead_steps = int(obs_cfg.get("lookahead_steps", 0))
+        if self.lookahead_steps < 0:
+            raise ValueError("observation.lookahead_steps must be >= 0")
+        self.demand_norm_vph = float(obs_cfg.get("demand_norm", 2500.0))
+        self.ramp_norm_vph = float(obs_cfg.get("ramp_norm", 1000.0))
+        default_norm = "fixed" if self.profile_mode else "minmax"
+        self.obs_normaliser = str(obs_cfg.get("normaliser", default_norm))
+        if self.obs_normaliser not in ("fixed", "minmax"):
+            raise ValueError("observation.normaliser must be 'fixed' or 'minmax'")
+        clip = obs_cfg.get("clip", [-3.0, 25.0] if self.profile_mode else None)
+        self.obs_clip = None if clip is None else (float(clip[0]), float(clip[1]))
+        # Append the (normalised) ramp arrival rate to the observation.
+        # Off by default in grid mode so pre-§7.10 policies keep their 22-dim
+        # input; always on in profile mode.
+        self.observe_ramp_demand = bool(
+            self.env_config.get("observe_ramp_demand", self.profile_mode)
+        )
+
         self.density_mean = float(self.env_config.get("density_mean", 0.0))
         self.density_std = max(float(self.env_config.get("density_std", 1.0)), 1e-6)
         reward_cfg = self.env_config.get("reward", {}) or {}
@@ -157,17 +261,20 @@ class SumoEnv(gym.Env):
                 "queue_scale",
                 self.env_config.get(
                     "queue_norm_scale",
-                    queue_cfg.get(
-                        "scale",
-                        reward_cfg.get(
-                            "queue_scale",
+                    obs_cfg.get(
+                        "queue_norm",
+                        queue_cfg.get(
+                            "scale",
                             reward_cfg.get(
-                                "queue_norm",
-                                max(
-                                    self.ramp_demand_vph
-                                    * self.duration_s
-                                    / 3600.0,
-                                    1.0,
+                                "queue_scale",
+                                reward_cfg.get(
+                                    "queue_norm",
+                                    max(
+                                        self.ramp_demand_vph
+                                        * self.duration_s
+                                        / 3600.0,
+                                        1.0,
+                                    ),
                                 ),
                             ),
                         ),
@@ -194,6 +301,9 @@ class SumoEnv(gym.Env):
         self.det_ids_per_lane = get_detector_ids_per_lane(self.sumo_config)
         self.x_grid = get_x_grid(self.sumo_config)
         self.N_x = len(self.det_ids_per_lane)
+        self.dx_km = float(self.x_grid[1] - self.x_grid[0]) / 1000.0 if self.N_x > 1 else 0.1
+        self._cum_offered = 0.0
+        self._cum_served = 0.0
         self.t_grid = np.arange(self.T_ctrl, dtype=np.float32) * self.dt_ctrl
 
         self.network_dir = self._resolve_path(
@@ -203,22 +313,33 @@ class SumoEnv(gym.Env):
             )
         )
         self.network_dir.mkdir(parents=True, exist_ok=True)
-        self.network_files = build_network(str(self.network_dir), self.sumo_config)
+        SumoEnv._instance_counter += 1
+        self._traci_label = f"sumo_env_{SumoEnv._instance_counter}_{os.getpid()}"
+        reuse = bool(self.env_config.get("reuse_network", False))
+        net_path = self.network_dir / "net.net.xml"
+        if reuse and net_path.exists():
+            self.network_files = {"net": str(net_path.resolve()),
+                                  "route": str((self.network_dir / "routes.rou.xml").resolve())}
+        else:
+            self.network_files = build_network(str(self.network_dir), self.sumo_config)
         self.detector_file = str((self.network_dir / "detectors.add.xml").resolve())
-        build_detector_file(self.detector_file, self.sumo_config)
+        if not (reuse and Path(self.detector_file).exists()):
+            build_detector_file(self.detector_file, self.sumo_config)
         self.routes_by_demand: dict[float, str] = {}
-        for demand_vph in self.demand_levels:
-            self._route_for_demand(demand_vph)
+        if not self.profile_mode:
+            for demand_vph in self.demand_levels:
+                self._route_for_demand(demand_vph)
 
         self.action_space = spaces.Box(
             low=np.array([0.0], dtype=np.float32),
             high=np.array([1.0], dtype=np.float32),
             dtype=np.float32,
         )
+        self.obs_dim = self.N_x + 3 + int(self.observe_ramp_demand) + 2 * self.lookahead_steps
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(self.N_x + 3 + int(self.observe_ramp_demand),),
+            shape=(self.obs_dim,),
             dtype=np.float32,
         )
 
@@ -226,7 +347,10 @@ class SumoEnv(gym.Env):
         self.episode_index = 0
         self.k = 0
         self.current_demand_vph = float(self.demand_levels[0])
+        self.mainline_profile = np.full(self.T_ctrl, self.current_demand_vph, dtype=np.float32)
+        self.ramp_profile = np.full(self.T_ctrl, self.current_ramp_demand_vph, dtype=np.float32)
         self.current_density = np.zeros(self.N_x, dtype=np.float32)
+        self.current_sumo_seed = self.base_seed
         self._started = False
         self._veh_counter = 0
         self._ramp_arrival_accumulator = 0.0
@@ -240,16 +364,21 @@ class SumoEnv(gym.Env):
         self._queue_samples: list[float] = []
         self._physical_ramp_samples: list[int] = []
         self._reset_insertion_bookkeeping()
-        SumoEnv._instance_counter += 1
-        self._traci_label = f"sumo_env_{SumoEnv._instance_counter}_{os.getpid()}"
 
+    # ------------------------------------------------------------------ API
     def reset(
         self, *, seed: int | None = None, options: dict | None = None
     ) -> tuple[np.ndarray, dict]:
         """Start a new SUMO simulation with a sampled demand profile.
 
+        options (all optional):
+            demand_vph, ramp_demand_vph   grid mode: force the constant cell
+            sumo_seed                     SUMO random seed
+            profile                       DemandProfile or its dict (profile mode)
+            profile_index                 index into the frozen set (profile mode)
+
         Returns:
-            observation: shape (N_x + 3,)
+            observation: shape (obs_dim,)
             info: dict
         """
         super().reset(seed=seed)
@@ -258,16 +387,31 @@ class SumoEnv(gym.Env):
 
         self.close()
         options = options or {}
-        if "demand_vph" in options:
-            demand_vph = float(options["demand_vph"])
+        profile = self._choose_profile(options)
+        if profile is not None:
+            self.current_profile = profile
+            self.mainline_profile = profile.mainline_vph[: self.T_ctrl].astype(np.float32)
+            self.ramp_profile = profile.ramp_vph[: self.T_ctrl].astype(np.float32)
+            if len(self.mainline_profile) != self.T_ctrl:
+                raise ValueError(f"profile has {len(self.mainline_profile)} steps, env expects {self.T_ctrl}")
+            self.current_demand_vph = float(self.mainline_profile[0])
+            self.current_ramp_demand_vph = float(self.ramp_profile[0])
+            route_file = self._route_for_profile(profile)
         else:
-            demand_vph = float(self.rng.choice(self.demand_levels))
-        self.current_demand_vph = demand_vph
-        if "ramp_demand_vph" in options:
-            ramp_demand_vph = float(options["ramp_demand_vph"])
-        else:
-            ramp_demand_vph = float(self.rng.choice(self.ramp_demand_levels))
-        self.current_ramp_demand_vph = ramp_demand_vph
+            self.current_profile = None
+            if "demand_vph" in options:
+                demand_vph = float(options["demand_vph"])
+            else:
+                demand_vph = float(self.rng.choice(self.demand_levels))
+            self.current_demand_vph = demand_vph
+            if "ramp_demand_vph" in options:
+                ramp_demand_vph = float(options["ramp_demand_vph"])
+            else:
+                ramp_demand_vph = float(self.rng.choice(self.ramp_demand_levels))
+            self.current_ramp_demand_vph = ramp_demand_vph
+            self.mainline_profile = np.full(self.T_ctrl, demand_vph, dtype=np.float32)
+            self.ramp_profile = np.full(self.T_ctrl, ramp_demand_vph, dtype=np.float32)
+            route_file = self._route_for_demand(demand_vph)
 
         if "sumo_seed" in options:
             sim_seed = int(options["sumo_seed"])
@@ -275,7 +419,7 @@ class SumoEnv(gym.Env):
             sim_seed = int(seed)
         else:
             sim_seed = self.base_seed + self.episode_index
-        route_file = self._route_for_demand(demand_vph)
+        self.current_sumo_seed = sim_seed
         sumo_cmd = [
             self.sumo_binary,
             "--net-file",
@@ -310,18 +454,27 @@ class SumoEnv(gym.Env):
         self._insert_success = 0
         self._insert_rejected = 0
         self._teleports = 0
+        self._queue_override_steps = 0
+        self._queue_cap_exceeded_steps = 0
         self._arrived_vehicles = 0
         self._queue_samples = []
         self._physical_ramp_samples = []
+        self._cum_offered = 0.0
+        self._cum_served = 0.0
         self._reset_insertion_bookkeeping()
 
         obs = self._make_observation()
         info = {
             "demand_vph": self.current_demand_vph,
             "ramp_demand_vph": self.current_ramp_demand_vph,
+            "mainline_demand_vph": float(self.mainline_profile[0]),
+            "ramp_arrival_vph": float(self.ramp_profile[0]),
             "ramp_discharge_vph": self.ramp_discharge_vph,
             "sumo_seed": sim_seed,
             "time_s": 0.0,
+            "profile_set": self.current_profile.set_name if self.current_profile else "grid",
+            "profile_index": int(self.current_profile.index) if self.current_profile else -1,
+            "backend": "sumo",
         }
         return obs, info
 
@@ -334,7 +487,7 @@ class SumoEnv(gym.Env):
             action: shape (1,), ramp metering rate ∈ [0, 1]
 
         Returns:
-            observation: shape (N_x + 3,)
+            observation: shape (obs_dim,)
             reward: float
             terminated: bool
             truncated: bool
@@ -344,7 +497,19 @@ class SumoEnv(gym.Env):
             raise RuntimeError("Call reset() before step().")
 
         ramp_rate = float(np.clip(np.asarray(action, dtype=np.float32).reshape(-1)[0], 0.0, 1.0))
-        density, speed, flow, interval_info = self._advance_control_interval(ramp_rate)
+        u_requested = ramp_rate
+        query_k = min(self.k, self.T_ctrl - 1)
+        d_k = float(self.mainline_profile[query_k])
+        r_k = float(self.ramp_profile[query_k])
+        self.current_demand_vph = d_k
+        self.current_ramp_demand_vph = r_k
+        queue_before = float(self._virtual_queue_length)
+        # finite ramp storage (M14): force the meter open when the cap would bind
+        u_min = queue_override_rate(queue_before, r_k, self.ramp_queue_max_veh, self.ramp_discharge_vph, self.dt_ctrl)
+        ramp_rate = max(ramp_rate, u_min)
+        queue_override = ramp_rate > u_requested + 1e-9
+        self._queue_override_steps += int(queue_override)
+        density, speed, flow, interval_info = self._advance_control_interval(ramp_rate, r_k)
         self.current_density = density
         queue_length = float(interval_info.get("interval_queue_mean", 0.0))
         # Mainline outflow = vehicles that left the network during this
@@ -355,7 +520,21 @@ class SumoEnv(gym.Env):
         # 100 km/h, worse when slow); it is kept in info for diagnostics.
         outflow_vph = float(interval_info.get("interval_arrived", 0)) * 3600.0 / self.dt_ctrl
         det18_flow_vph = float(flow[-1])
-        reward_terms = self._reward_terms(density, queue_length, outflow_vph)
+        q_ref_k = offered_q_ref(
+            self.reward_weights, d_k, r_k, queue_before, self.ramp_discharge_vph, self.dt_ctrl
+        )
+        terminal_step = (self.k + 1) >= self.T_ctrl
+        dt_h = self.dt_ctrl / 3600.0
+        self._cum_offered += (d_k + r_k) * dt_h
+        self._cum_served += outflow_vph * dt_h
+        on_road = float(np.sum(density)) * self.dx_km
+        queue_end = float(self._virtual_queue_length)
+        queue_cap_exceeded = bool(self.ramp_queue_max_veh is not None and queue_end > self.ramp_queue_max_veh + 0.5)
+        self._queue_cap_exceeded_steps += int(queue_cap_exceeded)
+        backlog = backlog_estimate(self._cum_offered, self._cum_served, on_road, queue_end)
+        reward_terms = self._reward_terms(
+            density, queue_length, outflow_vph, q_ref=q_ref_k, terminal=terminal_step, backlog_veh=backlog
+        )
         raw_reward = float(reward_terms["reward"])
         reward_warmup_active = self._reward_warmup_active()
         reward = 0.0 if reward_warmup_active else raw_reward
@@ -367,13 +546,22 @@ class SumoEnv(gym.Env):
 
         info = {
             "time_s": float(min(self.k, self.T_ctrl) * self.dt_ctrl),
+            "k": int(self.k),
             "ramp_rate": ramp_rate,
+            "u": ramp_rate,
+            "u_requested": u_requested,
+            "u_override": float(queue_override),
+            "queue_max_veh": self.ramp_queue_max_veh if self.ramp_queue_max_veh is not None else -1.0,
+            "queue_cap_exceeded": float(queue_cap_exceeded),
+            "queue_override_steps": self._queue_override_steps,
+            "queue_cap_exceeded_steps": self._queue_cap_exceeded_steps,
             "density": density.copy(),
             "speed": speed.copy(),
             "flow": flow.copy(),
             "mean_density": reward_terms["mean_density"],
             "std_density": reward_terms["std_density"],
             "outflow_vph": reward_terms["outflow_vph"],
+            "q_ref": reward_terms["q_ref"],
             "det18_flow_vph": det18_flow_vph,
             "lost_outflow_frac": reward_terms["lost_outflow_frac"],
             "outflow_penalty": reward_terms["outflow_penalty"],
@@ -385,6 +573,14 @@ class SumoEnv(gym.Env):
             "queue_scale": float(self.queue_scale),
             "queue_norm": self._normalize_queue(queue_length),
             "std_penalty": reward_terms["std_penalty"],
+            "terminal_penalty": reward_terms["terminal_penalty"],
+            "on_road_veh": reward_terms["on_road_veh"],
+            "backlog_veh": reward_terms["backlog_veh"],
+            "tts_step_veh_h": reward_terms["tts_step_veh_h"],
+            "tts_penalty": reward_terms["tts_penalty"],
+            "cum_offered_veh": float(self._cum_offered),
+            "cum_served_veh": float(self._cum_served),
+            "reward_form": self.reward_weights.form,
             "reward_delta": float(self.reward_weights.delta),
             "reward_beta": float(self.reward_weights.beta),
             "reward_gamma": float(self.reward_weights.gamma),
@@ -396,6 +592,8 @@ class SumoEnv(gym.Env):
             "reward_warmup_s": float(self.reward_warmup_s),
             "demand_vph": self.current_demand_vph,
             "ramp_demand_vph": self.current_ramp_demand_vph,
+            "mainline_demand_vph": d_k,
+            "ramp_arrival_vph": r_k,
             "ramp_discharge_vph": self.ramp_discharge_vph,
             "arrived_vehicles": self._arrived_vehicles,
             "throughput_vph": self._throughput_vph(),
@@ -403,6 +601,7 @@ class SumoEnv(gym.Env):
             "insert_success": self._insert_success,
             "insert_rejected": self._insert_rejected,
             "teleports": self._teleports,
+            "backend": "sumo",
             **interval_info,
         }
         return obs, reward, terminated, truncated, info
@@ -418,6 +617,24 @@ class SumoEnv(gym.Env):
             pass
         finally:
             self._started = False
+
+    # ----------------------------------------------------------- internals
+    def _choose_profile(self, options: dict) -> DemandProfile | None:
+        """Profile for this episode, or None in grid mode."""
+        if "profile" in options and options["profile"] is not None:
+            p = options["profile"]
+            return p if isinstance(p, DemandProfile) else DemandProfile.from_dict(p)
+        if not self.profile_mode:
+            return None
+        if "profile_index" in options and options["profile_index"] is not None:
+            if self.profile_set is None:
+                raise ValueError("profile_index requires env.profiles to name a frozen set")
+            return self.profile_set[int(options["profile_index"]) % len(self.profile_set)]
+        if self.profile_family is not None:
+            return self.profile_family.sample(self.rng, "train", self.episode_index)
+        p = self.profile_set[self._profile_cursor % len(self.profile_set)]
+        self._profile_cursor += 1
+        return p
 
     def _reset_insertion_bookkeeping(self) -> None:
         # Ramp vehicles handed to traci.vehicle.add() that SUMO has not yet
@@ -436,13 +653,13 @@ class SumoEnv(gym.Env):
         self._pending_ramp_max = 0
 
     def _advance_control_interval(
-        self, ramp_rate: float
+        self, ramp_rate: float, ramp_arrival_vph: float
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
         traci.switch(self._traci_label)
         sum_count = np.zeros(self.N_x, dtype=np.float64)
         sum_speed = np.zeros(self.N_x, dtype=np.float64)
         speed_count = np.zeros(self.N_x, dtype=np.int32)
-        sum_occ = np.zeros(self.N_x, dtype=np.float64)
+        sum_occ_lanes = [np.zeros(len(lane_ids), dtype=np.float64) for lane_ids in self.det_ids_per_lane]
         interval_queue: list[float] = []
         interval_physical_ramp: list[int] = []
         interval_teleports = 0
@@ -457,10 +674,10 @@ class SumoEnv(gym.Env):
         interval_pending_ramp_max = 0
         n_pending_main = 0
         n_pending_ramp = 0
+        arrival_rate = float(ramp_arrival_vph) / 3600.0
 
         for _ in range(self.dt_ctrl_steps):
             if traci.simulation.getTime() >= self.warmup_s:
-                arrival_rate = self.current_ramp_demand_vph / 3600.0
                 self._ramp_arrival_accumulator += arrival_rate * self.step_len
                 n_arrivals = int(self._ramp_arrival_accumulator)
                 self._ramp_arrival_accumulator -= n_arrivals
@@ -478,6 +695,13 @@ class SumoEnv(gym.Env):
                 # a second time.
                 releasable = int(self._virtual_queue_length) - len(self._ramp_pending_ids)
                 n_release = min(n_release_capacity, max(releasable, 0))
+                if self._ramp_depart_pos is None:
+                    # stop line `ramp_stopline_offset_m` upstream of the merge nose (M14); "free" = v2
+                    if self.ramp_stopline_offset_m > 0.0:
+                        ramp_len = float(traci.lane.getLength("ramp_0"))
+                        self._ramp_depart_pos = f"{max(ramp_len - self.ramp_stopline_offset_m, 0.0):.2f}"
+                    else:
+                        self._ramp_depart_pos = "free"
                 for _ in range(n_release):
                     self._insert_attempts += 1
                     interval_insert_attempts += 1
@@ -489,7 +713,7 @@ class SumoEnv(gym.Env):
                             typeID="passenger",
                             depart=str(traci.simulation.getTime()),
                             departLane="first",
-                            departPos="free",
+                            departPos=self._ramp_depart_pos,
                             departSpeed="0",
                         )
                         self._veh_counter += 1
@@ -552,36 +776,23 @@ class SumoEnv(gym.Env):
             interval_physical_ramp.append(physical_ramp_occupancy)
 
             for j, lane_ids in enumerate(self.det_ids_per_lane):
-                for det_id in lane_ids:
+                for lane_idx, det_id in enumerate(lane_ids):
                     count = traci.inductionloop.getLastStepVehicleNumber(det_id)
                     spd_raw = traci.inductionloop.getLastStepMeanSpeed(det_id)
                     occ = traci.inductionloop.getLastStepOccupancy(det_id)
 
                     sum_count[j] += count
-                    sum_occ[j] += occ
+                    sum_occ_lanes[j][lane_idx] += occ
                     if spd_raw >= 0.0:
                         sum_speed[j] += spd_raw * count
                         speed_count[j] += count
 
-        flow_vph = sum_count / (self.dt_ctrl_steps * self.step_len) * 3600.0
-        mean_speed_mps = np.where(
-            speed_count > 0,
-            sum_speed / np.maximum(speed_count, 1),
-            0.0,
+        density, speed, flow = density_from_loops(
+            sum_count, sum_speed, speed_count, sum_occ_lanes,
+            self.dt_ctrl_steps, self.step_len, self.density_method,
+            self.vehicle_length_m, self.occupancy_effective_length_m, self.jam_density_veh_km,
+            merge_station_lanes=self.merge_station_lanes,
         )
-        mean_speed_kmph = mean_speed_mps * 3.6
-
-        mean_occ_frac = sum_occ / (self.dt_ctrl_steps * 100.0)
-        density_occ = mean_occ_frac * (1000.0 / self.vehicle_length_m)
-        density_fd = np.where(
-            mean_speed_kmph > 5.0,
-            flow_vph / np.maximum(mean_speed_kmph, 1e-6),
-            density_occ,
-        )
-
-        density = density_fd.astype(np.float32)
-        speed = mean_speed_kmph.astype(np.float32)
-        flow = flow_vph.astype(np.float32)
         info = {
             "interval_arrived": interval_arrived,
             "interval_teleports": interval_teleports,
@@ -590,6 +801,7 @@ class SumoEnv(gym.Env):
             "interval_insert_rejected": interval_insert_rejected,
             "ramp_arrivals": interval_ramp_arrivals,
             "ramp_released": interval_ramp_departed,
+            "ramp_inflow_vph": float(interval_ramp_departed) * 3600.0 / self.dt_ctrl,
             "ramp_add_calls": interval_insert_success,
             "ramp_release_capacity": interval_release_capacity,
             "ramp_departed_total": self._ramp_departed,
@@ -614,20 +826,31 @@ class SumoEnv(gym.Env):
         }
         return density, speed, flow, info
 
+    # ---------------------------------------------------------- observation
+    def demand_features(self) -> list[float]:
+        """[d_k/norm, r_k/norm, (look-ahead ...)] for the *next* interval index."""
+        k = min(self.k, self.T_ctrl - 1)
+        d_k = float(self.mainline_profile[k])
+        r_k = float(self.ramp_profile[k])
+        if self.obs_normaliser == "minmax":
+            feats = [self._normalize_demand(d_k)]
+            if self.observe_ramp_demand:
+                feats.append(self._normalize_ramp_demand(r_k))
+        else:
+            feats = [d_k / self.demand_norm_vph]
+            if self.observe_ramp_demand:
+                feats.append(r_k / self.ramp_norm_vph)
+        if self.lookahead_steps > 0:
+            idx = np.clip(np.arange(k + 1, k + 1 + self.lookahead_steps), 0, self.T_ctrl - 1)
+            feats.extend((self.mainline_profile[idx] / self.demand_norm_vph).tolist())
+            feats.extend((self.ramp_profile[idx] / self.ramp_norm_vph).tolist())
+        return feats
+
     def _make_observation(self) -> np.ndarray:
-        density_norm = (self.current_density - self.density_mean) / self.density_std
-        demand_norm = self._normalize_demand(self.current_demand_vph)
-        time_norm = float(min(self.k, self.T_ctrl) / max(self.T_ctrl, 1))
-        queue_norm = self._normalize_queue(self._virtual_queue_length)
-        scalars = [demand_norm]
-        if self.observe_ramp_demand:
-            scalars.append(self._normalize_ramp_demand(self.current_ramp_demand_vph))
-        scalars += [time_norm, queue_norm]
-        return np.concatenate(
-            [
-                density_norm.astype(np.float32),
-                np.array(scalars, dtype=np.float32),
-            ]
+        return build_observation(
+            self.current_density, self.density_mean, self.density_std, self.obs_clip,
+            self.demand_features(), float(min(self.k, self.T_ctrl) / max(self.T_ctrl, 1)),
+            self._normalize_queue(self._virtual_queue_length),
         )
 
     def _normalize_ramp_demand(self, ramp_demand_vph: float) -> float:
@@ -646,10 +869,12 @@ class SumoEnv(gym.Env):
         return float(max(queue_length, 0.0) / self.queue_scale)
 
     def _reward_terms(
-        self, density: np.ndarray, queue_length: float, outflow_vph: float | None
+        self, density: np.ndarray, queue_length: float, outflow_vph: float | None,
+        q_ref: float | None = None, terminal: bool = False, backlog_veh: float = 0.0,
     ) -> dict[str, float]:
         return compute_reward_terms(
-            density, queue_length, outflow_vph, self.reward_weights
+            density, queue_length, outflow_vph, self.reward_weights, q_ref=q_ref, terminal=terminal,
+            backlog_veh=backlog_veh, dt_ctrl_s=float(self.dt_ctrl),
         )
 
     def _throughput_vph(self) -> float:
@@ -672,6 +897,12 @@ class SumoEnv(gym.Env):
         _write_routes(route_path, cfg_for_demand)
         self.routes_by_demand[key] = str(route_path.resolve())
         return self.routes_by_demand[key]
+
+    def _route_for_profile(self, profile: DemandProfile) -> str:
+        """Per-episode route file (one <flow> per 5-min block), private to this env."""
+        route_path = self.network_dir / f"routes_{self._traci_label}.rou.xml"
+        _write_routes(route_path, self.sumo_config, profile.mainline_flow_blocks())
+        return str(route_path.resolve())
 
     def _load_sumo_config(self, env_config: dict) -> dict:
         if "sumo" in env_config:
@@ -696,3 +927,16 @@ class SumoEnv(gym.Env):
         if p.is_absolute():
             return p
         return self.project_root / p
+
+
+def build_observation(
+    density: np.ndarray, density_mean: float, density_std: float, clip: tuple[float, float] | None,
+    demand_features: list[float], time_norm: float, queue_norm: float,
+) -> np.ndarray:
+    """Observation layout shared by SumoEnv and SurrogateVecEnv:
+    [z-scored density (clipped) | demand features | k / K | Q / queue_scale]."""
+    density_norm = (np.asarray(density, dtype=np.float32) - density_mean) / max(density_std, 1e-6)
+    if clip is not None:
+        density_norm = np.clip(density_norm, clip[0], clip[1])
+    scalars = list(demand_features) + [float(time_norm), float(queue_norm)]
+    return np.concatenate([density_norm.astype(np.float32), np.array(scalars, dtype=np.float32)])

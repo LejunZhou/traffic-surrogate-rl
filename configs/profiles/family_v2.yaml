@@ -1,0 +1,64 @@
+# Demand-profile family v2 (M14 / scenario v3b, user decisions 2026-09-14).
+# Same shapes and ranges as family_v1 with three constraints so that every
+# training profile is over by minute 45 and never exceeds the 900 veh/h meter:
+#   - step family: a step-down's 10-min fall is complete by minute 45
+#   - ramp surge: start + length <= 45
+#   - ramp surge capped at 800 veh/h (v1: 1000), also for the OOD early surge
+#     (600 tried first with D = 900: no storage lever left, M14 progress §9)
+# Piecewise-constant on 5-min blocks (12 blocks, 10 control steps each).
+# All rates in veh/h, all times in minutes. Sampled per episode by
+# sumo_env.demand_profiles.ProfileFamily; frozen sets live in configs/profiles/v2/.
+# version 2 also changes the seed stream, so draws differ from v1 at equal index.
+version: 2
+block_min: 5
+horizon_min: 60
+mainline:
+  families: {peak: 0.6, step: 0.3, const: 0.1}
+  peak:
+    d_base: [1200, 1700]
+    amplitude: [300, 900]
+    t_center_min: [15, 35]
+    half_width_min: [7.5, 15]
+    d_max: 2300
+    peak_end_max_min: 45        # raised-cosine bump must be over by minute 45 (D11)
+  step:
+    d_base: [1200, 1600]
+    d_high: [1800, 2300]
+    t1_min: [5, 25]
+    ramp_min: 10                # linear rise over 10 min
+    t2_offset_min: [10, 20]
+    p_step_down: 0.5
+    plateau_end_max_min: 45     # without an explicit step-down the plateau still ends by 45 (D11)
+    step_down_end_max_min: 45   # v2: with a step-down, the 10-min fall is complete by 45 (v1: up to 55)
+  const:
+    d: [1500, 2000]
+ramp:
+  families: {surge: 0.8, const: 0.2}
+  surge:
+    r_base: [200, 500]
+    amplitude: [0, 500]
+    t_start_min: [5, 40]
+    length_min: [10, 20]
+    end_max_min: 45             # v2: start + length <= 45 (v1: surges could run to minute 60)
+    r_max: 800                  # v2: never above 2/3 of the 1200 veh/h meter (v1: 1000)
+  const:
+    r: [300, 800]
+# Out-of-distribution families (evaluation only, set O).
+ood:
+  double:                       # two raised-cosine peaks
+    d_base: [1200, 1600]
+    amplitude: [300, 700]
+    t_center_min: [[10, 18], [32, 40]]
+    half_width_min: [5, 8]
+    d_max: 2300
+  plateau:                      # 2200 vph for 30 min
+    d_base: [1300, 1600]
+    d_high: 2200
+    t1_min: [5, 15]
+    length_min: 30
+  early_surge:                  # M-peak with a 600 vph ramp surge starting before the peak
+    amplitude_r: 600
+    lead_min: [10, 20]
+    length_min: [10, 20]
+    r_base: [200, 400]
+    r_max: 800                  # v2: same cap as the training surge
