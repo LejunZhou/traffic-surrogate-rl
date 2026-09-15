@@ -37,7 +37,7 @@ for sub in ("src", "scripts"):
     if str(PROJECT_ROOT / sub) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT / sub))
 
-from rl.profile_eval import evaluate_on_profiles, load_set, print_summary, sumo_env_config  # noqa: E402
+from rl.profile_eval import evaluate_on_profiles, load_set, print_summary, scenario_overlays, sumo_env_config  # noqa: E402
 from rl.reward import RewardWeights  # noqa: E402
 from sumo_env.rollout import load_rollout_npz  # noqa: E402
 from sumo_env.rollout_store import RolloutStore  # noqa: E402
@@ -52,8 +52,10 @@ CATASTROPHIC = -150.0
 
 def run_ppo(run_dir: Path, config: str, overlay: str, ensemble_dir: Path, steps: int, seed: int, init_policy: Path | None,
             extra_sets: list[str], log: Path) -> Path:
-    cmd = [sys.executable, "-m", "rl.train_ppo", "--config", config, "--overlay", overlay, "--ensemble-dir", str(ensemble_dir),
-           "--seed", str(seed), "--total-timesteps", str(steps), "--set", f"output.run_dir={run_dir}"]
+    cmd = [sys.executable, "-m", "rl.train_ppo", "--config", config, "--overlay", overlay]
+    for ov in scenario_overlays():
+        cmd += ["--overlay", ov]
+    cmd += ["--ensemble-dir", str(ensemble_dir), "--seed", str(seed), "--total-timesteps", str(steps), "--set", f"output.run_dir={run_dir}"]
     if init_policy is not None:
         cmd += ["--init-policy", str(init_policy)]
     for s in extra_sets:
@@ -109,6 +111,8 @@ def main() -> None:
     dataset_ee = sum(1 for e in base_store.entries if e["round"] == 0)
     profiles = load_set(args.val_set, PROJECT_ROOT)
     rcfg = merge_configs(load_config(str(PROJECT_ROOT / args.config)), load_config(str(PROJECT_ROOT / args.overlay)))
+    for ov in scenario_overlays():
+        rcfg = merge_configs(rcfg, load_config(str(PROJECT_ROOT / ov)))
     weights = RewardWeights.from_config(rcfg["env"]["reward"])
     warmup_s = float(rcfg["env"]["reward"].get("warmup_s", 90))
 

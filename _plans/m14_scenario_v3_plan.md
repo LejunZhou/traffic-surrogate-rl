@@ -75,5 +75,6 @@ the reward's flow cap together. Revisit before the paper-scale runs.
 - Demand family v2 (`configs/profiles/family_v2.yaml`, frozen sets `configs/profiles/v2/`):
   step-down and ramp surge over by minute 45, ramp surge ≤ 600 veh/h; v1 untouched.
 - Terminal queue weight stays 0 (user). Rollouts record `pending_ramp` + `pending_ramp_max`.
-- E0 characterisation on v3b run 2026-09-14 (progress §9); the round-0 / ensemble / PPO /
-  aggregation re-run waits for the user's go.
+- E0 characterisation on v3b run 2026-09-14 (progress §9, §11); single-constant gate added (§12).
+- Study driver `scripts/run_v3b_study.sh` (scenario overlay + profile sets via environment
+  variables, smoke mode); the v3b study itself runs on the user's Windows machine.

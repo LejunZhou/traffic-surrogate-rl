@@ -85,17 +85,19 @@ class SurrogateVecEnv(VecEnv):
         self.norm = plant.norm
 
         # ---- scenario constants (parity with SumoEnv) -----------------------
-        self.ramp_discharge_vph = float(cfg.get("ramp_discharge_vph", 1600.0))
-        # M14: finite ramp storage, same rule as SumoEnv (env key, else the
-        # scenario file's demand block, else unlimited)
-        _qmax = cfg.get("ramp_queue_max_veh")
-        if _qmax is None and cfg.get("sumo_config"):
+        # Meter discharge D and the storage cap follow SumoEnv's rule: the env key
+        # wins, else the scenario file's demand block (M14: v3b has D = 1200),
+        # else the v2 defaults (1600, unlimited).
+        _demand = {}
+        if cfg.get("sumo_config"):
             try:
                 from utils.config import load_config as _load_cfg
                 _sc = cfg["sumo_config"]; _scp = Path(_sc) if Path(_sc).is_absolute() else self.project_root / _sc
-                _qmax = _load_cfg(str(_scp)).get("demand", {}).get("ramp_queue_max_veh")
+                _demand = dict(_load_cfg(str(_scp)).get("demand", {}))
             except Exception:
-                _qmax = None
+                _demand = {}
+        self.ramp_discharge_vph = float(cfg.get("ramp_discharge_vph", _demand.get("ramp_discharge_vph", 1600.0)))
+        _qmax = cfg.get("ramp_queue_max_veh", _demand.get("ramp_queue_max_veh"))
         self.ramp_queue_max_veh = float(_qmax) if _qmax else None
         self.warmup_s = float(cfg.get("ramp_warmup_s", 0.0))
         self.density_clip = (0.0, float(cfg.get("density_clip_max", 143.0)))

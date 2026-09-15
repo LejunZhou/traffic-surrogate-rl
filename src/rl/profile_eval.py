@@ -16,6 +16,7 @@ reference policy over the same (profile, seed) episodes.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -28,12 +29,22 @@ from utils.config import load_config, merge_configs
 from utils.ledger import Ledger
 
 
+def scenario_overlays() -> list[str]:
+    """Extra env overlays applied by every SUMO-side script (M14): the environment
+    variable SCENARIO_OVERLAY holds one or more YAML paths separated by ':' or
+    whitespace (e.g. configs/rl/env_v3b.yaml). Empty / unset = scenario v2."""
+    raw = os.environ.get("SCENARIO_OVERLAY", "").replace(":", " ").split()
+    return [r for r in raw if r]
+
+
 def sumo_env_config(project_root: Path, config: str = "configs/rl/ppo_common.yaml", overlay: str = "configs/rl/env_sumo.yaml",
-                    network_dir: str | None = None, extra: dict | None = None) -> dict:
-    """The env block of ppo_common + env_sumo (density stats resolved)."""
+                    network_dir: str | None = None, extra: dict | None = None, scenario_overlay: list[str] | None = None) -> dict:
+    """The env block of ppo_common + env_sumo (+ the scenario overlays; density stats resolved)."""
     cfg = load_config(str(project_root / config))
     if overlay:
         cfg = merge_configs(cfg, load_config(str(project_root / overlay)))
+    for ov in (scenario_overlays() if scenario_overlay is None else scenario_overlay):
+        cfg = merge_configs(cfg, load_config(str(project_root / ov)))
     env_cfg = dict(cfg["env"])
     env_cfg["project_root"] = str(project_root)
     if extra:
@@ -138,9 +149,11 @@ def print_summary(summary: dict, title: str = "") -> None:
 
 
 def load_set(name_or_path: str, project_root: Path) -> list[DemandProfile]:
+    """A frozen profile set by name ('val', 'test', 'ood' → $PROFILE_SETS_DIR/<name>.json,
+    default configs/profiles = family v1) or by path."""
     p = Path(name_or_path)
     if p.suffix != ".json":
-        p = project_root / "configs" / "profiles" / f"{name_or_path}.json"
+        p = project_root / os.environ.get("PROFILE_SETS_DIR", "configs/profiles") / f"{name_or_path}.json"
     elif not p.is_absolute():
         p = project_root / p
     return load_profile_set(p)

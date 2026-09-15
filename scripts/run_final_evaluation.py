@@ -43,6 +43,8 @@ def main() -> None:
             if args.only and arm["name"] not in args.only:
                 continue
             for p in arm["points"]:
+                if set_name not in p:      # manifests name test/ood outputs; derive others (e.g. val) from the test path
+                    p[set_name] = p["test"].replace("_test.jsonl", f"_{set_name}.jsonl")
                 out = PROJECT_ROOT / p[set_name]
                 if out.exists():
                     continue

@@ -75,3 +75,14 @@ def test_merge_station_density_uses_through_lane_only():
     assert abs(d_main[1] - 40.0) < 1e-3                                             # new rule: through lane only
     with pytest.raises(ValueError):
         density_from_loops(*args, merge_station_lanes="sum")
+
+
+def test_surrogate_env_reads_meter_discharge_from_scenario(tmp_path):
+    """SurrogateVecEnv must use the scenario file's D when the env config does not set it (parity with SumoEnv)."""
+    import inspect
+    from rl import surrogate_vec_env as sve
+    src = inspect.getsource(sve.SurrogateVecEnv.__init__)
+    assert '_demand.get("ramp_discharge_vph", 1600.0)' in src and 'ramp_queue_max_veh", _demand.get' in src
+    cfg = load_config(str(PROJECT_ROOT / "configs/rl/env_v3b.yaml"))["env"]
+    sc = load_config(str(PROJECT_ROOT / cfg["sumo_config"]))["demand"]
+    assert cfg["ramp_discharge_vph"] == sc["ramp_discharge_vph"] == 1200 and sc["ramp_queue_max_veh"] is None

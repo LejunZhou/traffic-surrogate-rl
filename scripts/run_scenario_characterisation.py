@@ -222,6 +222,18 @@ def main() -> None:
                              "best_flush": best_fl, "best_flush_return": fl[best_fl]["return"],
                              "margin": margin, "passed": passed,
                              "breakdown_u_first": next((u for u in CONST_GRID if cap[f"{u:.1f}"]["breakdown"]), None)}
+    # single-constant gate (M14): the one rate that is best on average over the
+    # profiles is what a non-adaptive controller can actually be set to; a
+    # profile passes when the best schedule beats *that* rate by the margin.
+    u_single = max(CONST_GRID, key=lambda u: sum(report["capacity"][i][f"{u:.1f}"]["return"] for i in report["capacity"]))
+    for i in report["gate"]:
+        g = report["gate"][i]
+        g["single_constant_u"] = f"{u_single:.1f}"
+        g["single_constant_return"] = report["capacity"][i][f"{u_single:.1f}"]["return"]
+        g["margin_single"] = g["best_flush_return"] - g["single_constant_return"]
+        g["passed_single"] = bool(g["peaked"] and g["margin_single"] >= GATE_MARGIN)
+    n_single = sum(int(g["passed_single"]) for g in report["gate"].values())
+    n_storage_single = sum(int(g["storage_needed"] and g["margin_single"] >= GATE_MARGIN) for g in report["gate"].values())
     frac = n_gate / max(n_peaked, 1)
     n_storage = sum(int(g["storage_needed"]) for g in report["gate"].values())
     n_storage_pass = sum(int(g["storage_needed"] and g["margin"] >= GATE_MARGIN) for g in report["gate"].values())
@@ -230,6 +242,10 @@ def main() -> None:
                               "passed": bool(frac >= 2 / 3), "margin_required": GATE_MARGIN,
                               "n_storage_needed": n_storage, "n_storage_passed": n_storage_pass,
                               "fraction_storage_needed": frac_storage, "passed_storage_needed": bool(frac_storage >= 2 / 3),
+                              "single_constant_u": f"{u_single:.1f}", "n_passed_single": n_single,
+                              "n_storage_passed_single": n_storage_single,
+                              "passed_single": bool(n_single / max(n_peaked, 1) >= 2 / 3),
+                              "passed_storage_needed_single": bool(n_storage_single / max(n_storage, 1) >= 2 / 3),
                               "wall_s": time.time() - t0, "n_rollouts": len(results)}
     out = PROJECT_ROOT / args.out
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -254,6 +270,10 @@ def main() -> None:
     print(f"  E0 gate (* = peak total > {STORAGE_NEEDED_VPH:.0f} vph, storage mandatory): "
           f"{gs['n_storage_passed']}/{gs['n_storage_needed']}: {'PASSED' if gs['passed_storage_needed'] else 'FAILED'}  "
           f"({gs['n_rollouts']} new rollouts, {gs['wall_s']:.0f} s)")
+    print(f"  E0 gate vs the best single constant (u = {gs['single_constant_u']} on every profile): "
+          f"{gs['n_passed_single']}/{gs['n_peaked']} peaked ({'PASSED' if gs['passed_single'] else 'FAILED'}), "
+          f"{gs['n_storage_passed_single']}/{gs['n_storage_needed']} storage-mandatory "
+          f"({'PASSED' if gs['passed_storage_needed_single'] else 'FAILED'})")
     print(f"  report: {out}")
 
 

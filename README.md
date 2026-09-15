@@ -79,6 +79,7 @@ STUDY=paper STEPS_PER_ROUND=1000000 ROUNDS=4 DIRECT_EE="200 700 2000" SEEDS="0 1
 # uncapped virtual queue priced by the TTS reward, merge-station density from the through lane only;
 # demand family v2 (configs/profiles/family_v2.yaml, frozen sets configs/profiles/v2/: all peaks/surges over by minute 45, surge <= 600 veh/h);
 # overlay configs/rl/env_v3b.yaml, data config configs/experiments/round0_v3b.yaml; layout figure _progress/figures/m14_v3b_road_layout.png
+# v3b study: sh scripts/run_v3b_study.sh (SMOKE=1 for a 20-min end-to-end check; SCENARIO_OVERLAY / PROFILE_SETS_DIR select the scenario)
 sh scripts/run_m13.sh            # M13: how small can round 0 be? 240-rollout stores (original vs closed-loop-heavy
                                  # mixture, no run-7 policy) + aggregation until the stop rule; figures in _progress/figures/m13
 ```

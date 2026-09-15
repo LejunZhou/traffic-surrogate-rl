@@ -43,6 +43,8 @@ def main() -> None:
     ap.add_argument("--store", default="data/plant_v2/round0")
     ap.add_argument("--mpc-spec", default=None, help="default mpc:<ensemble>,iters=30 (demo: iters=20,members=0-2)")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--r0-studies", nargs="*", default=["m9_round0", "m8_e0"], help="ledger studies whose wall time built the round-0 store")
+    ap.add_argument("--no-mpc", action="store_true", help="omit the Surrogate-MPC arm")
     args = ap.parse_args()
     out_dir = (PROJECT_ROOT / args.out).parent
     ev = f"{out_dir.relative_to(PROJECT_ROOT)}/eval"
@@ -53,7 +55,7 @@ def main() -> None:
             ens_wall = max(ens_wall, float(log.read_text().strip().splitlines()[-1].split(",")[5]))
         except Exception:
             pass
-    ens_wall += _ledger_wall("m9_round0") + _ledger_wall("m8_e0")
+    ens_wall += sum(_ledger_wall(st) for st in args.r0_studies)
     arms = []
 
     def add(name, kind, points):
@@ -96,8 +98,9 @@ def main() -> None:
                             "policy": args.alinea, "test": f"{ev}/alinea_test.jsonl", "ood": f"{ev}/alinea_ood.jsonl"}])
     add("constant u", "band", [{"ee": 198, "wall_s": 0.0, "seed": 0, "policy": args.constant,
                                 "test": f"{ev}/constant_test.jsonl", "ood": f"{ev}/constant_ood.jsonl"}])
-    add("Surrogate-MPC", "point", [{"ee": dataset_ee, "wall_s": ens_wall, "seed": 0, "policy": args.mpc_spec or f"mpc:{args.ensemble},iters=30",
-                                    "test": f"{ev}/mpc_test.jsonl", "ood": f"{ev}/mpc_ood.jsonl"}])
+    if not args.no_mpc:
+        add("Surrogate-MPC", "point", [{"ee": dataset_ee, "wall_s": ens_wall, "seed": 0, "policy": args.mpc_spec or f"mpc:{args.ensemble},iters=30",
+                                        "test": f"{ev}/mpc_test.jsonl", "ood": f"{ev}/mpc_ood.jsonl"}])
     for key, name in (("single_surrogate", "single-surrogate"), ("onestep_arm", "one-step model"), ("anticipative", "anticipative")):
         run = PROJECT_ROOT / f"runs/study/{args.study}/{key}"
         if (run / "best_model_selected.zip").exists():

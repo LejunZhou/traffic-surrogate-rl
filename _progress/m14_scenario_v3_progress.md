@@ -265,3 +265,40 @@ rules and the 800 cap keep the lever below v2's (surges to 1000, flush at 1600).
 remaining failures are step-plateau profiles where the hand grid mistimes the flush, not
 evidence that no dynamic policy can win there. Round-0 data will contain the blocked-ramp
 regime through the flush schedules (SumoEnv handles it; SurrogateVecEnv cannot reproduce it).
+
+## 12. Study driver for v3b and the single-constant gate (2026-09-15)
+**Gate line 2.** `run_scenario_characterisation.py` now also reports the margin of the best
+schedule over the best *single* constant (the one u maximising the summed return over the
+12 profiles; recorded per profile as `single_constant_u/return`, `margin_single`,
+`passed_single`, and in `gate_summary`). On v3b the single constant is u = 0.4 (480 veh/h):
+4/11 peaked and 3/8 storage-mandatory pass (per-profile constant: 3/11, 2/8) — so the
+earlier expectation that v3b "passes clearly" against a single constant was wrong: u = 0.4 is
+already the best constant on 6 of the 8 storage-mandatory profiles; the single constant loses
+mainly on the light profiles (best u 0.7–1.0), which are not storage-mandatory. Profile 5
+(step/surge 2834) flips from −18.6 to +46.2 because its best constant is 0.3.
+
+**Scenario-aware evaluation.** `rl.profile_eval.sumo_env_config` applies the overlays listed
+in the environment variable `SCENARIO_OVERLAY` (":"-separated YAML paths) after
+ppo_common + env_sumo; `load_set` resolves 'val'/'test'/'ood' under `PROFILE_SETS_DIR`
+(default configs/profiles = family v1). `run_aggregation_loop.py` passes the same overlays to
+its PPO runs and reward config. `build_arms_manifest.py`: `--r0-studies`, `--no-mpc`.
+`SurrogateVecEnv` reads the meter discharge from the scenario file when the env config does
+not set it (parity with SumoEnv; `env_v3b.yaml` also sets `ramp_discharge_vph: 1200`).
+Unset variables reproduce the v2 behaviour exactly.
+
+**Driver `scripts/run_v3b_study.sh`** (SCENARIO=v3b): E0 (if the report is missing) →
+round-0 dataset (`round0_v3b.yaml`, on top of the E0 rollouts) → 5-member ensemble → gate
+(val/test) → aggregation loop (patience 2, fine-tune 20 epochs) ‖ direct SUMO PPO (200, 700 EE)
+→ ALINEA tuning + constants on the v2 V set → checkpoint selection → manifest (no MPC) → final
+evaluation on the v2 T and O sets → figures in `_progress/figures/m14_v3b`. `SMOKE=1` runs
+the whole chain on isolated paths (40 rollouts, 2×2-epoch ensemble, 1 round of 4800 steps,
+4-EE direct arm, reduced ALINEA grid, final evaluation on V). Paper scale: `SEEDS="0 1 2"
+STEPS_PER_ROUND=1000000 ROUNDS=4 DIRECT_EE="200 700 2000"`.
+Smoke test (`SMOKE=1`, 2026-09-15, 14 min on the Mac): every stage ran end to end (40-rollout
+store, 2-member ensemble, gate (fails as expected for a 2-epoch model), 1 aggregation round,
+4-EE direct arm, reduced ALINEA grid, manifest with 5 arms, final evaluation on the v2 V set,
+figures 1/2/4). Two fixes found by it: the study writes `runs/study/<study>/env_study.yaml`
+(density stats from its own store) and appends it to SCENARIO_OVERLAY; the final evaluation
+derives the output path of a set the manifest does not name (val). The untrained smoke
+policies sit at the initial u = 0.3 (−97 on V) vs ALINEA −70 and constant 0.4 −80, as
+expected at 4800 PPO steps. Full suite: 66 passed, 7 skipped. Smoke artefacts deleted.
