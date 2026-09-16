@@ -1,0 +1,70 @@
+# Demand-profile family v3 (M15 / scenario v4, three-lane mainline, 2026-09-15).
+# Family v2 rescaled to the measured v4 capacities (_progress/m15_capacity_sweep_v4.json,
+# LC2013 defaults, 10 deg merge):
+#   - mainline alone: ~6150 veh/h served (insertion-limited, ~2050 veh/h/lane, no jam)
+#   - merge: breakdown when the lane-0 load d/3 + r exceeds ~2450 veh/h
+#     (5200+700 and 5800+400 pass, 5300+700 and 5200+800 break down)
+# Mainline: v2 ranges as fractions of the 2500 veh/h single-lane merge capacity,
+# applied to 6000 veh/h, peaks capped at 5750 (0.96 x 6000: the mainline alone never
+# jams and is never insertion-limited); the peak amplitude / step plateau ranges are
+# raised at the bottom so that mainline peaks reach 5000-5750 often enough.
+# Ramp: the ramp is ~10 % of the flow, so a storage-mandatory regime (lane-0 load
+# above 2450 during the mainline peak) needs a busier ramp than v2's: base 400-600,
+# surge to 600-1000 capped at 800 (= 2/3 of the 1200 veh/h meter, the v2 cap) and
+# starting between minutes 10 and 30 so that it overlaps the peak; constant ramp
+# 500-800. Storage-mandatory share under the lane-0 rule: ~0.39 of the training
+# family (v2 ranges on v4 would give 0.12); 4 of the 12 E0 draws. The 45-min
+# timing rules are v2. version 3 changes the seed stream, so draws differ from v2.
+version: 3
+block_min: 5
+horizon_min: 60
+mainline:
+  families: {peak: 0.6, step: 0.3, const: 0.1}
+  peak:
+    d_base: [2900, 4100]        # v2 1200-1700 = 0.48-0.68 C
+    amplitude: [1200, 2700]     # v2 300-900 = 0.12-0.36 C, raised to 0.20-0.45 C (peaks above 5750 are clipped, ~19 %)
+    t_center_min: [15, 35]
+    half_width_min: [7.5, 15]
+    d_max: 5750                 # 0.96 x 6000 (v2: 2300 = 0.92 x 2500)
+    peak_end_max_min: 45
+  step:
+    d_base: [2900, 3850]        # v2 1200-1600
+    d_high: [4600, 5750]        # v2 1800-2300 = 0.72-0.92 C, raised to 0.77-0.96 C
+    t1_min: [5, 25]
+    ramp_min: 10
+    t2_offset_min: [10, 20]
+    p_step_down: 0.5
+    plateau_end_max_min: 45
+    step_down_end_max_min: 45
+  const:
+    d: [3800, 5000]             # v2 1500-2000
+ramp:
+  families: {surge: 0.8, const: 0.2}
+  surge:
+    r_base: [400, 600]          # v2 200-500
+    amplitude: [200, 400]       # v2 0-500
+    t_start_min: [10, 30]       # v2 5-40
+    length_min: [10, 20]
+    end_max_min: 45
+    r_max: 800                  # unchanged: 2/3 of the 1200 veh/h meter
+  const:
+    r: [500, 800]               # v2 300-800
+# Out-of-distribution families (evaluation only, set O).
+ood:
+  double:                       # two raised-cosine peaks
+    d_base: [2900, 3850]
+    amplitude: [900, 2000]
+    t_center_min: [[10, 18], [32, 40]]
+    half_width_min: [5, 8]
+    d_max: 5750
+  plateau:                      # 5300 vph for 30 min (v2: 2200 = 0.88 C)
+    d_base: [3100, 3850]
+    d_high: 5300
+    t1_min: [5, 15]
+    length_min: 30
+  early_surge:                  # peak with a 600 vph ramp surge starting before the peak
+    amplitude_r: 600
+    lead_min: [10, 20]
+    length_min: [10, 20]
+    r_base: [300, 500]          # v2 200-400
+    r_max: 800

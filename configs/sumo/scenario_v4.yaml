@@ -1,0 +1,69 @@
+# Scenario v4 (M15, 2026-09-15): scenario v3b on a three-lane mainline.
+#   - mainline 3 lanes (acceleration edge 4 lanes, zipper drop of the outer lane
+#     100 m past the nose); the on-ramp joins the rightmost lane (lane 0)
+#   - everything about the ramp is v3b: 200 m acceleration segment at 120 km/h
+#     joining at 10 deg, meter at its start (insertion at position 0), discharge
+#     D = 1200 veh/h, uncapped virtual queue priced by the TTS reward
+#   - lane changing: SUMO default LC2013 with default parameters (user decision
+#     2026-09-15; M15 progress section 2: keep-right / impatience have no effect
+#     at the merge, speed-gain / assertiveness shift the capacity 5800 -> 6400
+#     and are kept as a sensitivity check, not the baseline)
+#   - observation and DeepONet targets stay one density per station = mean over
+#     the through lanes (merge_station_lanes mainline drops the acceleration
+#     lane at the nose station); no per-lane channel (user decision 2026-09-15)
+#   - breakdown threshold of the episode metrics lowered from 60 to 30
+#     veh/km/lane: the merge breakdown is a lane-0 queue (75-80 veh/km) with
+#     free neighbours (19), which reads ~38 in the through-lane mean, while
+#     free flow near capacity is ~20 (M15 progress section 1)
+# Demand family: configs/profiles/family_v3.yaml (mainline ranges scaled to the
+# measured 3-lane capacity; ramp ranges unchanged).
+
+network:
+  highway_length_m: 2000.0
+  ramp_position_m: 1300.0
+  ramp_length_m: 200.0
+  speed_limit_mps: 33.33
+  ramp_speed_limit_mps: 33.33          # 120 km/h (same as the mainline)
+  ramp_entry_angle_deg: 10.0           # M14 progress section 13
+  acceleration_lane_length_m: 100.0
+  num_lanes: 3
+
+simulation:
+  duration_s: 3600
+  step_length_s: 1
+  dt_ctrl_s: 30
+  seed: 42
+  sumo_binary: "sumo"
+  max_depart_delay_s: -1
+  sumo_extra_args: ["--extrapolate-departpos"]
+
+demand:
+  mainline_demand_vph: 5000      # grid-mode fallback only
+  ramp_demand_vph: 800           # grid-mode fallback only
+  ramp_discharge_vph: 1200       # meter saturation flow D (one-lane ramp, unchanged)
+  ramp_model: "metered_queue"
+  demand_profile: "profile"
+  ramp_stopline_offset_m: 200.0  # = ramp length: the stop bar is the start of the simulated ramp
+  ramp_queue_max_veh: null       # no storage cap
+
+vehicle:
+  idm_tau_s: 1.0
+  depart_speed: "desired"
+  speed_dev: 0.03
+  min_gap_m: 2.0                 # jam density = 1000 / (5 + 2) = 143 veh/km/lane
+  # lane_change: {}              # LC2013 defaults; e.g. {lcSpeedGain: 3, lcAssertive: 2} for the sensitivity variant
+
+detectors:
+  n_detectors: 19
+  spacing_m: 100.0
+  start_position_m: 100.0
+  vehicle_length_m: 5.0
+  density_method: "occupancy"
+  merge_station_lanes: "mainline"  # nose station: mean over the 3 through lanes, acceleration lane ignored
+  occupancy_effective_length_m: 5.0
+  jam_density_veh_km: 142.857
+  breakdown_density_veh_km: 30.0   # lane-averaged density: lane-0 jam reads ~38, free flow at capacity ~20 (v3b: 60 on one lane)
+
+output:
+  raw_dir: "data/raw"
+  network_dir: "data/raw/network_v4"

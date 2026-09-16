@@ -76,6 +76,14 @@ class DemandProfile:
     def peak_mainline_vph(self) -> float:
         return float(np.max(self.mainline_blocks))
 
+    def peak_merge_load_vph(self, n_lanes: int = 1) -> float:
+        """Peak load on the merge lane, max_k (d_k / n_lanes + r_k) (M15): with one
+        lane this is peak_total_vph; on a multi-lane mainline the ramp shock is a
+        lane-0 event and the storage-mandatory rule compares this to the per-lane
+        merge capacity (~2450-2500 veh/h on v3b and v4 alike)."""
+        n = max(int(n_lanes), 1)
+        return float(np.max(self.mainline_blocks / n + self.ramp_blocks))
+
     @property
     def is_peaked(self) -> bool:
         """True when the mainline demand is not (near) constant."""

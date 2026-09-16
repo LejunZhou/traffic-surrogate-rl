@@ -31,13 +31,14 @@ on v4.
 |---|---|---|---|
 | `network.num_lanes` | 1 | 3 | the scenario |
 | merge station density | through lane only | mean of the 3 through lanes (code already does this for n > 1) | one field per station |
-| demand family `family_v3.yaml` | mainline 1200–2300, ramp 200–800 | mainline scaled to the measured v4 capacity (expect base 3600–4800, peaks to ≈ 0.95 × C, C ≈ 6000–6600); ramp unchanged 200–800, surge cap 800 | same 45-min timing rules as family v2 |
-| storage-mandatory threshold (`STORAGE_NEEDED_VPH`, `enforce_storage_mandatory`) | 2500 | ≈ C from E0 | gate definition |
-| E0 feedforward capacities, insertion rate | 2300 / 2400 / 2500, 1040 | C − 200 / C − 100 / C, ramp-max ≥ any r_k (unchanged 1040 if ramp family unchanged) | meter-aware grid, rates in veh/h |
+| demand family `family_v3.yaml` | mainline 1200–2300, ramp 200–800 | **done 2026-09-15**: mainline 2900–5750 (peaks capped at 0.96 × 6000; mainline alone serves ≈ 6150), ramp base 400–600 + surge 200–400 capped 800 starting 10–30 min, constant ramp 500–800 (progress §3: v2's ramp gives only a 12 % storage-mandatory share on three lanes; v3 gives 0.39) | same 45-min timing rules as family v2 |
+| storage-mandatory threshold (`STORAGE_NEEDED_VPH`, `enforce_storage_mandatory`) | 2500 | **lane-aware rule** (2026-09-15): peak merge load max_k(d_k/3 + r_k) > 2450 (`e0.storage_needed_vph`, `dataset.storage_mandatory_vph`); the merge breaks down at a lane-0 load ≈ 2450, the same per-lane capacity as v3b's 2500 | gate definition |
+| E0 feedforward capacities, insertion rate | 2300 / 2400 / 2500, 1040 | per-lane 2350 / 2400 / 2450 (`feedforward_schedule` now divides d by the lane count), 1040 | meter-aware grid, rates in veh/h |
 | observation `demand_norm` | 2500 | ≈ C | z-scores / normalised demand features |
 | surrogate normalisers `mainline_demand`, `flow` | 2500, 2500 | ≈ C, ≈ C | inputs / outputs in [0, 1] |
 | reward `q_ref` / `q_cap` | 2970 (1-lane IDM) | ≈ 3× | only if the outflow term is used (TTS form: unaffected) |
-| ALINEA grid `--rhos` | 26–38 veh/km/lane | same (per-lane) | density is per lane |
+| ALINEA grid `--rhos` | 26–38 veh/km/lane | **lower**: ≈ 16–25 on the through-lane mean (free flow at capacity 17–20, lane-0 jam reads 35–38); also the round-0 `alinea_wide` set-point range (knob to add before step 4) | the observed density is a lane mean, not a lane density |
+| breakdown threshold (`detectors.breakdown_density_veh_km`, new) | 60 | 30 on the through-lane mean (a lane-0 jam of 77 with free neighbours reads 38) | the detector, the E0 columns and the plant gate all use it |
 | meter discharge D | 1200 | 1200 | one-lane ramp, unchanged |
 | ramp entry angle | 10° | 10° | M14 §13 |
 
@@ -62,6 +63,7 @@ Two design decisions to take with the user before E0:
   background on day one.
 
 ## Steps, gates, budgets
+(Status 2026-09-15: steps 1–2 done — progress §3; noise-floor rollouts deferred to step 4. Step 3 done — progress §4: **G2 failed** on the "metering matters" clause: the constant grid is flat on 8/12 profiles and the best schedule beats the single constant u = 0.9 by ≤ 28 veh h on the 4 loaded ones (v3b: 53 veh h lever on 8/12). Step 4 on hold pending the user's choice among options A–D in progress §4 (recommended: B, a busier ramp family with D 1800–2400, then E0 again).)
 1. **Scenario + configs + tests** (½ day): `scenario_v4.yaml`, `env_v4.yaml`,
    `round0_v4.yaml`, `family_v3.yaml` with placeholder capacity, `tests/test_scenario_v4.py`
    (3-lane geometry, 4-lane acceleration edge, one loop per lane, merge-station averaging,

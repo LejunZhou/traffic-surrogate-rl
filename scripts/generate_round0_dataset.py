@@ -77,11 +77,13 @@ def main() -> None:
         print(f"[round0] store has {store.summary()['n']} rollouts {have}; generating {n} more: {need}")
     plan = build_mixture_plan(n, int(ds.get("seed", 0)), shares, round_index=0,
                               legacy_policy_path=legacy_path, sumo_seed_base=int(ds.get("sumo_seed_base", 50000)),
-                              per_entry_seeds=bool(ds.get("per_entry_seeds", False)))
+                              per_entry_seeds=bool(ds.get("per_entry_seeds", False)),
+                              feedforward_capacity_vph=ds.get("feedforward_capacity_vph"))
     frac = float(ds.get("storage_mandatory_frac", 0.0))
     if frac > 0:
         family = ProfileFamily.load(PROJECT_ROOT / cfg["env"]["profiles"]["family"])
-        summary = enforce_storage_mandatory(plan, family, frac, float(ds.get("storage_mandatory_vph", 2500.0)))
+        n_lanes = int(load_config(str(PROJECT_ROOT / cfg["env"]["sumo_config"])).get("network", {}).get("num_lanes", 1))
+        summary = enforce_storage_mandatory(plan, family, frac, float(ds.get("storage_mandatory_vph", 2500.0)), n_lanes=n_lanes)
         print(f"[round0] storage-mandatory profiles: {summary}")
         store.root.mkdir(parents=True, exist_ok=True)
         (store.root / "generation_plan_summary.json").write_text(json.dumps(summary, indent=1))

@@ -35,15 +35,18 @@ from pathlib import Path
 
 import numpy as np
 
-BREAKDOWN_DENSITY = 60.0     # veh/km/lane, max over detectors
+BREAKDOWN_DENSITY = 60.0     # veh/km/lane, max over detectors (single-lane scenarios v2/v3/v3b)
 BREAKDOWN_MIN_STEPS = 10     # 5 min at 30 s steps
 
 
-def breakdown_flags(density: np.ndarray, dt_ctrl_s: float = 30.0) -> dict:
-    """Breakdown = max_i rho_{i,k} > 60 veh/km for >= 5 consecutive minutes.
-    Recovered = a breakdown occurred and the last 5 minutes are jam-free."""
+def breakdown_flags(density: np.ndarray, dt_ctrl_s: float = 30.0, threshold: float = BREAKDOWN_DENSITY) -> dict:
+    """Breakdown = max_i rho_{i,k} > threshold (default 60 veh/km) for >= 5 consecutive minutes.
+    Recovered = a breakdown occurred and the last 5 minutes are jam-free.
+    The threshold is the scenario's detectors.breakdown_density_veh_km (M15: a
+    lane-averaged multi-lane density needs a lower value, e.g. 30 on the 3-lane v4
+    where a lane-0 jam reads ~38 in the mean)."""
     rho_max = np.max(np.asarray(density, dtype=np.float64), axis=0)   # (K,)
-    jam = rho_max > BREAKDOWN_DENSITY
+    jam = rho_max > float(threshold)
     n_min = max(1, int(round(BREAKDOWN_MIN_STEPS * 30.0 / dt_ctrl_s)))
     onset = None
     run = 0
@@ -71,10 +74,11 @@ def breakdown_flags(density: np.ndarray, dt_ctrl_s: float = 30.0) -> dict:
         "recovered": recovered,
         "jam_steps": int(jam.sum()),
         "rho_max": float(rho_max.max()),
+        "breakdown_density_veh_km": float(threshold),
     }
 
 
-def episode_metrics(arrays: dict, dt_ctrl_s: float, dx_km: float) -> dict:
+def episode_metrics(arrays: dict, dt_ctrl_s: float, dx_km: float, breakdown_density: float = BREAKDOWN_DENSITY) -> dict:
     """Metrics of §10 from the per-step arrays."""
     density = np.asarray(arrays["density"], dtype=np.float64)
     K = density.shape[1]
@@ -102,7 +106,7 @@ def episode_metrics(arrays: dict, dt_ctrl_s: float, dx_km: float) -> dict:
         "queue_penalty_sum": float(np.sum(arrays.get("queue_penalty", 0.0))),
         "std_penalty_sum": float(np.sum(arrays.get("std_penalty", 0.0))),
     }
-    out.update(breakdown_flags(density, dt_ctrl_s))
+    out.update(breakdown_flags(density, dt_ctrl_s, threshold=breakdown_density))
     return out
 
 
@@ -174,7 +178,8 @@ def rollout_episode(env, controller, reset_options: dict | None = None, determin
         if terminated or truncated:
             break
     dx_km = float(getattr(env, "x_grid", np.arange(N_x) * 100.0)[1] - getattr(env, "x_grid", np.arange(N_x) * 100.0)[0]) / 1000.0 if N_x > 1 else 0.1
-    metrics = episode_metrics(arr, float(env.dt_ctrl), dx_km)
+    metrics = episode_metrics(arr, float(env.dt_ctrl), dx_km,
+                              breakdown_density=float(getattr(env, "breakdown_density_veh_km", BREAKDOWN_DENSITY)))
     metrics["wall_s"] = float(time.time() - t0)
     metrics["teleports"] = int(last_info.get("teleports", 0))
     metrics["discarded_mainline"] = int(last_info.get("discarded_mainline", 0))

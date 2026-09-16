@@ -213,6 +213,10 @@ class SumoEnv(gym.Env):
         self.jam_density_veh_km = float(
             det_cfg.get("jam_density_veh_km", 1000.0 / (self.vehicle_length_m + self.min_gap_m))
         )
+        # Breakdown threshold of the episode metrics (max station density, >= 5 min;
+        # sumo_env.rollout.breakdown_flags). 60 veh/km/lane on the single-lane
+        # scenarios; a lane-averaged multi-lane density needs a lower value (M15).
+        self.breakdown_density_veh_km = float(det_cfg.get("breakdown_density_veh_km", 60.0))
 
         self.demand_levels = [
             float(v)
@@ -793,6 +797,10 @@ class SumoEnv(gym.Env):
             self.vehicle_length_m, self.occupancy_effective_length_m, self.jam_density_veh_km,
             merge_station_lanes=self.merge_station_lanes,
         )
+        # diagnostic (M15 merge-observation test): per-lane occupancy density of the last interval
+        self.last_per_lane_density = [
+            np.minimum(np.asarray(o, dtype=np.float64) / (self.dt_ctrl_steps * 100.0) * (1000.0 / self.occupancy_effective_length_m),
+                       self.jam_density_veh_km) for o in sum_occ_lanes]
         info = {
             "interval_arrived": interval_arrived,
             "interval_teleports": interval_teleports,

@@ -23,6 +23,7 @@ cd "$(dirname "$0")/.."
 export PYTHONPATH=src
 command -v sumo >/dev/null 2>&1 || { echo "sumo not on PATH (activate the project env or install eclipse-sumo)"; exit 1; }
 SCENARIO=${SCENARIO:-v3b}
+MILESTONE=${MILESTONE:-m14}          # prefix of the E0 report, ALINEA report, ledgers and figure dir (M15: MILESTONE=m15 SCENARIO=v4)
 export SCENARIO_OVERLAY=${SCENARIO_OVERLAY:-configs/rl/env_$SCENARIO.yaml}
 export PROFILE_SETS_DIR=${PROFILE_SETS_DIR:-configs/profiles/v2}
 ROUND0_CFG=${ROUND0_CFG:-configs/experiments/round0_$SCENARIO.yaml}
@@ -50,7 +51,7 @@ WORKERS=${WORKERS:-8}
 STOP_DELTA=${STOP_DELTA:-2.0}
 STOP_PATIENCE=${STOP_PATIENCE:-2}
 OUT=runs/study/$STUDY
-E0_REPORT=_progress/m14_e0_${SCENARIO}_characterisation.json
+E0_REPORT=_progress/${MILESTONE}_e0_${SCENARIO}_characterisation.json
 mkdir -p $OUT runs/logs
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 # study-specific overlay: density normalisation from this study's round-0 store
@@ -63,7 +64,7 @@ log "study $STUDY: scenario $SCENARIO (overlay $SCENARIO_OVERLAY, profiles $PROF
 # ---------------------------------------------------------------- E0 (its rollouts seed the round-0 store)
 if [ "$SKIP_E0" != "1" ] && [ ! -f $E0_REPORT ]; then
   log "E0 characterisation"
-  python scripts/run_scenario_characterisation.py --config $ROUND0_CFG --out $E0_REPORT --study m14_e0_$SCENARIO --workers $WORKERS > runs/logs/${STUDY}_e0.log 2>&1
+  python scripts/run_scenario_characterisation.py --config $ROUND0_CFG --out $E0_REPORT --study ${MILESTONE}_e0_$SCENARIO --workers $WORKERS > runs/logs/${STUDY}_e0.log 2>&1
 fi
 
 # ---------------------------------------------------------------- round-0 dataset
@@ -104,7 +105,7 @@ for ee in $DIRECT_EE; do
 done
 
 # ---------------------------------------------------------------- baselines: ALINEA tuning + constants (SUMO workers)
-ALINEA_JSON=_progress/m14_alinea_tuning_${STUDY}.json
+ALINEA_JSON=_progress/${MILESTONE}_alinea_tuning_${STUDY}.json
 [ -f $ALINEA_JSON ] || python scripts/tune_alinea_profiles.py --workers $WORKERS --study ${STUDY}_alinea --out $ALINEA_JSON $ALINEA_ARGS > runs/logs/${STUDY}_alinea.log 2>&1
 wait
 BEST_ALINEA=$(python -c "import json;print(json.load(open('$ALINEA_JSON'))['best_alinea'])")
@@ -119,7 +120,7 @@ done; done
 
 # ---------------------------------------------------------------- manifest, final evaluation, figures
 python scripts/build_arms_manifest.py --study $STUDY --seeds $SEEDS --direct-ee $DIRECT_EE --alinea "$BEST_ALINEA" --constant "$BEST_CONST" \
-    --ensemble $ENS --store $STORE --r0-studies ${STUDY}_r0 m14_e0_$SCENARIO --no-mpc --out $OUT/arms.json
+    --ensemble $ENS --store $STORE --r0-studies ${STUDY}_r0 ${MILESTONE}_e0_$SCENARIO --no-mpc --out $OUT/arms.json
 python scripts/run_final_evaluation.py --arms $OUT/arms.json --workers $WORKERS --study ${STUDY}_final --sets $FINAL_SETS > runs/logs/${STUDY}_final_eval.log 2>&1
-python scripts/plot_sample_efficiency.py --arms $OUT/arms.json --rounds $(ls runs/aggregation/${STUDY}_s*/rounds.json) --e1 "" --out _progress/figures/m14_$STUDY
+python scripts/plot_sample_efficiency.py --arms $OUT/arms.json --rounds $(ls runs/aggregation/${STUDY}_s*/rounds.json) --e1 "" --out _progress/figures/${MILESTONE}_$STUDY
 log "study $STUDY complete: $OUT"

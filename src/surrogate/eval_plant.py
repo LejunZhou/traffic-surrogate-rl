@@ -70,7 +70,9 @@ def evaluate_rollouts(ensemble: DeepONetEnsemble, store_dir: str | Path, files: 
         r_true = episode_return(arrays, true, q_true, weights, warmup_s, ensemble.dt, dx_km)
         r_pred = episode_return(arrays, rho_hat, q_hat, weights, warmup_s, ensemble.dt, dx_km)
         r_members = [episode_return(arrays, np.maximum(rho_m[m], 0), np.maximum(q_m[m], 0), weights, warmup_s, ensemble.dt, dx_km) for m in range(ensemble.M)]
-        bf_true = breakdown_flags(true, ensemble.dt); bf_pred = breakdown_flags(rho_hat, ensemble.dt)
+        # the rollout's own threshold (scenario detectors.breakdown_density_veh_km, recorded in its metrics; M15)
+        bd_thr = float(meta.get("metrics", {}).get("breakdown_density_veh_km", 60.0))
+        bf_true = breakdown_flags(true, ensemble.dt, threshold=bd_thr); bf_pred = breakdown_flags(rho_hat, ensemble.dt, threshold=bd_thr)
         row = {
             "file": fn, "group": str(meta.get("controller", {}).get("type", "unknown")) if group_key == "controller_type" else str(meta.get(group_key, "")),
             "round": int(meta.get("round", 0)), "peak_total": float(meta.get("profile", {}).get("peak_total_vph", 0.0)),

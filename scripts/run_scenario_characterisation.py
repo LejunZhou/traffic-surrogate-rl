@@ -74,6 +74,25 @@ def _frac(rate_vph: float, D: float) -> float:
     return float(min(max(rate_vph / D, 0.0), 1.0))
 GATE_MARGIN = 15.0
 STORAGE_NEEDED_VPH = 2500.0   # profiles whose peak total exceeds ~capacity (2480-2500): storage is mandatory
+# Scenario-dependent constants (M15): the round-0 config may override them under an
+# `e0:` block: storage_needed_vph (default: dataset.storage_mandatory_vph, else 2500),
+# ff_capacity_vph (default [2300, 2400, 2500]), insertion_vph (default 1040). The
+# v2/v3/v3b configs have no e0 block and reproduce the constants above exactly.
+
+
+def _merge_lanes(env_cfg: dict) -> int:
+    """Mainline lane count of the scenario (the storage rule and the feedforward schedules
+    use the per-lane merge load d / n + r; M15)."""
+    sc = _load_cfg(str(PROJECT_ROOT / env_cfg["sumo_config"]))
+    return max(int(sc.get("network", {}).get("num_lanes", 1)), 1)
+
+
+def _e0_constants(cfg: dict) -> tuple[float, list[float], float]:
+    e0 = dict(cfg.get("e0", {}) or {})
+    storage = float(e0.get("storage_needed_vph", (cfg.get("dataset", {}) or {}).get("storage_mandatory_vph", STORAGE_NEEDED_VPH)))
+    ff = [float(c) for c in e0.get("ff_capacity_vph", FF_CAPACITY)]
+    ins = float(e0.get("insertion_vph", INSERTION_VPH))
+    return storage, ff, ins
 
 
 def main() -> None:
@@ -99,10 +118,14 @@ def main() -> None:
     ins_profiles = [family.sample_by_key("e0", 100 + i) for i in range(args.n_insertion)]
 
     D = _meter_discharge_vph(env_cfg)
+    STORAGE_NEEDED_VPH, FF_CAPACITY, INSERTION_VPH = _e0_constants(cfg)   # noqa: N806 (scenario overrides of the module constants)
+    N_LANES = _merge_lanes(env_cfg)   # noqa: N806
     U_PRE = _frac(U_PRE_VPH, D); U_HIGH = _frac(U_HIGH_VPH, D); FF_UMIN = _frac(FF_UMIN_VPH, D)
     U_LOW = [_frac(v, D) for v in U_LOW_VPH]; U_LOW2 = [_frac(v, D) for v in U_LOW2_VPH]; U_HIGH2 = [_frac(v, D) for v in U_HIGH2_VPH]
     print(f"[E0] meter discharge D = {D:.0f} veh/h: u_pre {U_PRE:.2f}, u_low {[round(u, 2) for u in U_LOW]}, flush {U_HIGH:.2f}, "
           f"u_low2 {[round(u, 2) for u in U_LOW2]}, u_high2 {[round(u, 2) for u in U_HIGH2]}, ff u_min {FF_UMIN:.3f}, insertion {_frac(INSERTION_VPH, D):.2f}")
+    print(f"[E0] {N_LANES} mainline lane(s): storage-mandatory when peak merge load max_k(d_k/{N_LANES} + r_k) > {STORAGE_NEEDED_VPH:.0f} veh/h; "
+          f"feedforward per-lane capacities {FF_CAPACITY}, insertion rate {INSERTION_VPH:.0f} veh/h")
 
     jobs = []
     # (i) insertion check at a pass-through rate (1040 vph >= any r_k)
@@ -174,7 +197,9 @@ def main() -> None:
 
     report = {"profiles": [p.to_dict() for p in profiles], "insertion": [], "capacity": {}, "flush": {}, "gate": {},
               "reward": report_reward, "meter_discharge_vph": D,
-              "schedule_grid": {"u_pre": U_PRE, "u_low": U_LOW, "u_high": U_HIGH, "u_low2": U_LOW2, "u_high2": U_HIGH2, "ff_u_min": FF_UMIN}}
+              "schedule_grid": {"u_pre": U_PRE, "u_low": U_LOW, "u_high": U_HIGH, "u_low2": U_LOW2, "u_high2": U_HIGH2, "ff_u_min": FF_UMIN,
+                                "ff_capacity_vph": FF_CAPACITY, "insertion_vph": INSERTION_VPH, "storage_needed_vph": STORAGE_NEEDED_VPH,
+                                "merge_lanes": N_LANES}}
     # (i)
     for i, p in enumerate(ins_profiles):
         m = metrics[f"e0_insertion_{i:03d}"]
@@ -210,7 +235,7 @@ def main() -> None:
         best_fl = max(fl, key=lambda k: fl[k]["return"])
         margin = fl[best_fl]["return"] - cap[best_u]["return"]
         peaked = p.is_peaked
-        storage_needed = bool(p.peak_total_vph > STORAGE_NEEDED_VPH)
+        storage_needed = bool(p.peak_merge_load_vph(N_LANES) > STORAGE_NEEDED_VPH)
         passed = bool(peaked and margin >= GATE_MARGIN)
         n_peaked += int(peaked); n_gate += int(passed)
         n_storage = locals().get("n_storage", 0) + int(storage_needed)
@@ -218,6 +243,7 @@ def main() -> None:
         report["capacity"][i] = cap
         report["flush"][i] = fl
         report["gate"][i] = {"profile": p.label, "peaked": peaked, "storage_needed": storage_needed, "peak_total": p.peak_total_vph,
+                             "peak_merge_load": p.peak_merge_load_vph(N_LANES),
                              "best_constant_u": best_u, "best_constant_return": cap[best_u]["return"],
                              "best_flush": best_fl, "best_flush_return": fl[best_fl]["return"],
                              "margin": margin, "passed": passed,
@@ -267,7 +293,7 @@ def main() -> None:
     gs = report["gate_summary"]
     print(f"\n  E0 gate (all peaked profiles): {gs['n_passed']}/{gs['n_peaked']} with margin >= {GATE_MARGIN}: "
           f"{'PASSED' if gs['passed'] else 'FAILED'}")
-    print(f"  E0 gate (* = peak total > {STORAGE_NEEDED_VPH:.0f} vph, storage mandatory): "
+    print(f"  E0 gate (* = peak merge load d/{N_LANES} + r > {STORAGE_NEEDED_VPH:.0f} vph, storage mandatory): "
           f"{gs['n_storage_passed']}/{gs['n_storage_needed']}: {'PASSED' if gs['passed_storage_needed'] else 'FAILED'}  "
           f"({gs['n_rollouts']} new rollouts, {gs['wall_s']:.0f} s)")
     print(f"  E0 gate vs the best single constant (u = {gs['single_constant_u']} on every profile): "

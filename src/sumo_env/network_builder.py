@@ -317,7 +317,9 @@ def _write_routes(path: Path, config: dict, mainline_blocks: list[tuple[float, f
         f'           tau="{tau:.2f}"\n'
         f'           maxSpeed="{spd:.2f}"\n'
         '           speedFactor="1.0"\n'
-        f'           speedDev="{speed_dev:.2f}"/>\n'
+        f'           speedDev="{speed_dev:.2f}"'
+        + "".join(f'\n           {k}="{v}"' for k, v in (config.get("vehicle", {}).get("lane_change") or {}).items())   # optional SUMO lane-change attrs (M15)
+        + '/>\n'
         '\n'
         f'    <route id="route_main" edges="{main_edges}"/>\n'
         f'    <route id="route_ramp" edges="{ramp_edges}"/>\n'

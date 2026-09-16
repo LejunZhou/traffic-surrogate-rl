@@ -1,0 +1,38 @@
+# Plant-model DeepONet for scenario v4 (M15): plant_v2.yaml with the v4 store and the
+# normalisers / shock band rescaled to a three-lane mainline. The model (GRU branch,
+# PlantTrunk, 5 bootstrap members, 300 epochs) is the one that passed the v3b gate.
+#   normalisers: mainline demand and exit flow ~ capacity 6000 veh/h (v3b: 2500);
+#     ramp inflow unchanged (one-lane ramp, D = 1200)
+#   band: the lane-averaged density of a lane-0 jam is ~38 (v3b single lane: 60-80),
+#     so the extra-weight band starts at 25 instead of 40
+data:
+  store_dir: data/plant_v4/round0
+  sumo_config: configs/sumo/scenario_v4.yaml
+  n_query_points: 512
+  mode: causal
+  padded_views_per_rollout: 8
+  band: {rho_min: 25.0, x_max_m: 1400.0, weight: 2.0}   # extra weight in the shockwave band (through-lane mean)
+  outflow_weight: 1.0
+  normalisers: {mainline_demand: 6000.0, ramp_inflow: 1600.0, flow: 6000.0}
+model:
+  branch: {type: gru, hidden: 128, layers: 2, latent_dim: 256}
+  trunk: {hidden_dim: 512, layers: 3, latent_dim: 256, fourier_features: 0}
+ensemble: {members: 5, bootstrap: true}
+training:
+  n_epochs: 300
+  lr: 0.001
+  schedule: cosine
+  warmup_epochs: 5
+  weight_decay: 0.000001
+  batch_size: 16
+  grad_clip_norm: 1.0
+  eval_every: 5
+  seed: 0
+  num_threads: 2
+  select_on: val_rel_l2
+finetune:
+  epochs: 20
+  lr: 0.0003
+output:
+  base_dir: runs/surrogate
+  run_name: plant_v4_round0

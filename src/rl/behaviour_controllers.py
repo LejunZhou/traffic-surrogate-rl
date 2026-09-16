@@ -95,11 +95,12 @@ def store_and_flush_schedule(
 
 
 def feedforward_schedule(profile: DemandProfile, capacity_vph: float, discharge_vph: float, lag_steps: int = 0,
-                         u_min: float = 0.05, K: int = 120) -> np.ndarray:
-    """Capacity-tracking feedforward: u_k = clip((C - d_{k+lag}) / D, u_min, 1).
-    Releases whatever merge margin the mainline leaves; the natural
+                         u_min: float = 0.05, K: int = 120, n_lanes: int = 1) -> np.ndarray:
+    """Capacity-tracking feedforward: u_k = clip((C - d_{k+lag} / n_lanes) / D, u_min, 1).
+    Releases whatever merge-lane margin the mainline leaves (C = per-lane merge
+    capacity; the mainline is split evenly over n_lanes, M15); the natural
     'anticipative' schedule against which constants are measured in E0."""
-    d = profile.mainline_vph[:K]
+    d = profile.mainline_vph[:K] / max(int(n_lanes), 1)
     idx = np.clip(np.arange(K) + int(lag_steps), 0, K - 1)
     u = (float(capacity_vph) - d[idx]) / float(discharge_vph)
     return np.clip(u, u_min, 1.0).astype(np.float32)
@@ -268,9 +269,12 @@ TYPE_IDS = {"constant": 1, "alinea": 2, "store_flush": 3, "feedforward": 4, "leg
 DEFAULT_SHARES = {"constant": 0.20, "alinea": 0.25, "store_flush": 0.20, "legacy_policy": 0.15, "random_signal": 0.20}
 
 
+FEEDFORWARD_CAPACITY_VPH = (2250.0, 2550.0)   # round-0 feedforward capacity draw range, single-lane merge (v2/v3/v3b)
+
+
 def build_mixture_plan(n: int, seed: int, shares: dict | None = None, round_index: int = 0,
                        legacy_policy_path: str | None = None, sumo_seed_base: int = 50000,
-                       per_entry_seeds: bool = False) -> list[dict]:
+                       per_entry_seeds: bool = False, feedforward_capacity_vph=None) -> list[dict]:
     """Deterministic list of rollout specs for round 0.
 
     Each spec: {index, round, profile_set: "train", profile_draw: int, sumo_seed,
@@ -285,8 +289,11 @@ def build_mixture_plan(n: int, seed: int, shares: dict | None = None, round_inde
     other types' parameters unchanged.
 
     An explicit "feedforward" share disables the legacy fold (one third of the
-    store_flush draws becoming feedforward).
+    store_flush draws becoming feedforward). feedforward_capacity_vph=(lo, hi)
+    sets the capacity draw range of the feedforward schedules (default: the
+    single-lane 2250-2550; M15 v4 passes a range around the 3-lane capacity).
     """
+    ff_range = tuple(float(v) for v in (feedforward_capacity_vph or FEEDFORWARD_CAPACITY_VPH))
     shares = dict(shares or DEFAULT_SHARES)
     if legacy_policy_path is None or not Path(legacy_policy_path).exists():
         # D13 risk table: without the run-7 checkpoint, give its share to ALINEA.
@@ -305,7 +312,7 @@ def build_mixture_plan(n: int, seed: int, shares: dict | None = None, round_inde
             raise ValueError(f"unknown controller type {ctype!r}")
         for j in range(count):
             draw_rng = np.random.default_rng(np.random.SeedSequence([int(seed), TYPE_IDS[ctype], j])) if per_entry_seeds else rng
-            spec = _draw_controller_spec(ctype, j, draw_rng, legacy_policy_path, fold_feedforward=fold_feedforward)
+            spec = _draw_controller_spec(ctype, j, draw_rng, legacy_policy_path, fold_feedforward=fold_feedforward, ff_range=ff_range)
             plan.append({
                 "index": idx, "round": int(round_index), "profile_set": "train",
                 "profile_draw": int(1_000_000 * (round_index + 1) + idx),
@@ -322,10 +329,10 @@ def build_mixture_plan(n: int, seed: int, shares: dict | None = None, round_inde
 
 
 def enforce_storage_mandatory(plan: list[dict], family, frac: float, vph: float = 2500.0, stride: int = 10_000,
-                              max_attempts: int = 100, set_name: str = "train") -> dict:
+                              max_attempts: int = 100, set_name: str = "train", n_lanes: int = 1) -> dict:
     """Re-draw the profiles of the first ceil(frac * n) plan entries until their
-    peak total demand exceeds `vph` (storage-mandatory profiles, where ramp
-    metering matters). Draws advance by `stride` per attempt so they never
+    peak merge load max_k(d_k / n_lanes + r_k) exceeds `vph` (storage-mandatory
+    profiles, where ramp metering matters; n_lanes = 1 is the peak total demand). Draws advance by `stride` per attempt so they never
     collide with other entries or with later rounds. Records profile_draw,
     profile_base_draw, profile_attempts, storage_mandatory and peak_total_vph
     on every entry (in place) and returns a summary."""
@@ -339,7 +346,7 @@ def enforce_storage_mandatory(plan: list[dict], family, frac: float, vph: float 
         draw, attempt = base, 0
         prof = family.sample_by_key(set_name, draw)
         if p["storage_mandatory"]:
-            while prof.peak_total_vph <= vph:
+            while prof.peak_merge_load_vph(n_lanes) <= vph:
                 attempt += 1
                 if attempt > max_attempts:
                     raise RuntimeError(f"no storage-mandatory profile within {max_attempts} draws from {base}")
@@ -348,10 +355,11 @@ def enforce_storage_mandatory(plan: list[dict], family, frac: float, vph: float 
         p["profile_draw"] = int(draw)
         p["profile_attempts"] = int(attempt)
         p["peak_total_vph"] = float(prof.peak_total_vph)
+        p["peak_merge_load_vph"] = float(prof.peak_merge_load_vph(n_lanes))
         attempts_max = max(attempts_max, attempt)
-    above = [p for p in plan if p["peak_total_vph"] > vph]
-    return {"n": n, "n_mandatory": n_mand, "threshold_vph": float(vph), "frac_above_threshold": len(above) / max(n, 1),
-            "max_attempts": attempts_max}
+    above = [p for p in plan if p["peak_merge_load_vph"] > vph]
+    return {"n": n, "n_mandatory": n_mand, "threshold_vph": float(vph), "n_lanes": int(n_lanes),
+            "frac_above_threshold": len(above) / max(n, 1), "max_attempts": attempts_max}
 
 
 def _draw_alinea_wide(rng: np.random.Generator) -> dict:
@@ -366,7 +374,8 @@ def _draw_alinea_wide(rng: np.random.Generator) -> dict:
             "u_init": float(rng.uniform(0.1, 0.8)), "queue_max": None if qmax == 0 else float(qmax)}
 
 
-def _draw_controller_spec(ctype: str, j: int, rng: np.random.Generator, legacy_path, fold_feedforward: bool = True) -> dict:
+def _draw_controller_spec(ctype: str, j: int, rng: np.random.Generator, legacy_path, fold_feedforward: bool = True,
+                          ff_range=FEEDFORWARD_CAPACITY_VPH) -> dict:
     if ctype == "constant":
         return {"type": "constant", "u": float(CONSTANT_GRID[j % len(CONSTANT_GRID)])}
     if ctype == "alinea":
@@ -376,7 +385,7 @@ def _draw_controller_spec(ctype: str, j: int, rng: np.random.Generator, legacy_p
                 "u_init": float(rng.uniform(0.2, 0.6))}
     if ctype == "feedforward" or (ctype == "store_flush" and fold_feedforward and j % 3 == 2):
         # E0 finding: flushing at u = 1 jams, capacity-tracking schedules are the anticipative reference
-        return {"type": "feedforward", "capacity_vph": float(rng.uniform(2250, 2550)),
+        return {"type": "feedforward", "capacity_vph": float(rng.uniform(ff_range[0], ff_range[1])),
                 "lag_steps": int(rng.integers(0, 3)), "u_min": float(rng.uniform(0.0, 0.15))}
     if ctype == "store_flush":
         return {"type": "store_flush", "u_pre": float(rng.uniform(0.25, 0.6)), "u_low": float(rng.uniform(0.0, 0.3)),
@@ -439,8 +448,9 @@ def make_controller_from_spec(spec: dict, env, profile: DemandProfile | None = N
     if ctype == "feedforward":
         if profile is None:
             raise ValueError("feedforward needs the episode profile")
+        n_lanes = int((getattr(env, "sumo_config", {}) or {}).get("network", {}).get("num_lanes", 1))
         sched = feedforward_schedule(profile, spec["capacity_vph"], float(env.ramp_discharge_vph),
-                                     int(spec.get("lag_steps", 0)), float(spec.get("u_min", 0.05)), K=K)
+                                     int(spec.get("lag_steps", 0)), float(spec.get("u_min", 0.05)), K=K, n_lanes=n_lanes)
         return ScheduleController(sched, spec)
     if ctype == "legacy_policy":
         return LegacyPolicyController(spec["path"], spec["noise_sigma"], seed=spec.get("seed", 0),

@@ -1,0 +1,49 @@
+# Round-0 plant-model dataset for scenario v4 (M15, three-lane mainline). Same
+# mixture as round0_v3b.yaml; the scenario-dependent numbers follow the v4
+# capacity sweep (_progress/m15_capacity_sweep_v4.json): the merge breaks down
+# when the lane-0 load d/3 + r exceeds ~2450 veh/h (per-lane merge capacity,
+# v3b: ~2500 on one lane), the mainline alone serves ~6150 veh/h.
+env:
+  sumo_config: configs/sumo/scenario_v4.yaml
+  profiles: {family: configs/profiles/family_v3.yaml}
+  density_mean: 20.0
+  density_std: 12.0
+  queue_norm_scale: 100.0
+  observation: {lookahead_steps: 0, demand_norm: 6000.0}
+  reward:            # only used to log returns of the behaviour rollouts (TTS form: q_ref feeds the logged outflow term only)
+    form: tts
+    tts_scale: 1.0
+    dx_km: 0.1
+    delta: 3.572
+    beta: 1.0
+    gamma: 0.063
+    q_ref: 5950.0
+    q_ref_mode: offered
+    q_cap: 5950.0
+    queue_norm: 400.0
+    sigma_ref: 6.0
+    warmup_s: 90
+dataset:
+  n_rollouts: 288
+  seed: 14
+  sumo_seed_base: 72000
+  per_entry_seeds: true
+  storage_mandatory_frac: 0.5
+  storage_mandatory_vph: 2450          # peak merge load max_k(d_k / 3 + r_k) > 2450 veh/h (lane-aware rule, M15)
+  feedforward_capacity_vph: [2200, 2500]   # per-lane capacity draw range of the feedforward schedules (v3b: 2250-2550 total)
+  mixture:
+    alinea_wide: 0.25
+    alinea_dither: 0.15
+    store_flush: 0.25
+    feedforward: 0.15
+    random_signal: 0.10
+    constant: 0.10
+e0:                                     # scenario constants of scripts/run_scenario_characterisation.py
+  storage_needed_vph: 2450              # same rule as dataset.storage_mandatory_vph
+  ff_capacity_vph: [2350, 2400, 2450]   # per-lane merge capacities of the feedforward grid (v3b: 2300/2400/2500 total)
+  insertion_vph: 1040                   # pass-through rate of the insertion check (>= any ramp rate, unchanged)
+splits: {train_frac: 0.7, val_frac: 0.15, seed: 0}
+output:
+  store_dir: data/plant_v4/round0
+  network_dir: data/plant_v4/network
+  workers: 10

@@ -52,3 +52,14 @@ needs approval.
     T/O) vs tuned PI-ALINEA −46.4 (+5 [+3, +7]), ≈ +7 on O;
     direct PPO −50.2 at 855 EE (8.6 behind A1 at equal budget) and −74.4 at 290 EE. Study
     complete, progress §14. Open: seeds 1–2, paper scale.
+15. M15 Scenario v4 (three-lane mainline) — `m15_scenario_v4_three_lane_plan.md`: does the
+    v3b result transfer to a 3-lane freeway (LC2013 defaults, lane-averaged observation)?
+    2026-09-15: user decisions taken (observation lane-averaged, LC2013 defaults), v3b seed
+    sweep deferred. Capacity sweep: mainline alone ≈ 6150 veh/h, merge breaks down at a
+    lane-0 load d/3 + r ≈ 2450 (same per-lane capacity as v3b) → lane-aware storage rule and
+    feedforward, breakdown threshold as a scenario parameter (30 on the lane mean); configs
+    scenario_v4 / family_v3 (busier ramp: base 400–600, surge cap 800) / sets v3 / round0_v4 /
+    env_v4 / plant_v4, tests. E0 on v4 (progress §4): gate failed — metering has almost no
+    lever on v4 (constant grid flat on 8/12 profiles, ≤ 28 veh h on the loaded 4; v3b: 53 veh h
+    on 8/12) because the lane-0 jam leaves the other lanes free. Round 0 not started; user to
+    choose: busier ramp (v4b, recommended), downstream bottleneck (v4c), run anyway, or family shift.

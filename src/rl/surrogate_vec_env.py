@@ -88,14 +88,17 @@ class SurrogateVecEnv(VecEnv):
         # Meter discharge D and the storage cap follow SumoEnv's rule: the env key
         # wins, else the scenario file's demand block (M14: v3b has D = 1200),
         # else the v2 defaults (1600, unlimited).
-        _demand = {}
+        _demand = {}; _dets = {}
         if cfg.get("sumo_config"):
             try:
                 from utils.config import load_config as _load_cfg
                 _sc = cfg["sumo_config"]; _scp = Path(_sc) if Path(_sc).is_absolute() else self.project_root / _sc
-                _demand = dict(_load_cfg(str(_scp)).get("demand", {}))
+                _scfg = _load_cfg(str(_scp))
+                _demand = dict(_scfg.get("demand", {})); _dets = dict(_scfg.get("detectors", {}))
             except Exception:
-                _demand = {}
+                _demand = {}; _dets = {}
+        # breakdown threshold of the episode metrics (parity with SumoEnv, M15)
+        self.breakdown_density_veh_km = float(cfg.get("breakdown_density_veh_km", _dets.get("breakdown_density_veh_km", 60.0)))
         self.ramp_discharge_vph = float(cfg.get("ramp_discharge_vph", _demand.get("ramp_discharge_vph", 1600.0)))
         _qmax = cfg.get("ramp_queue_max_veh", _demand.get("ramp_queue_max_veh"))
         self.ramp_queue_max_veh = float(_qmax) if _qmax else None
@@ -373,7 +376,8 @@ class SurrogateVecEnv(VecEnv):
                             rc[key].append(0.0 if info["reward_warmup_active"] else info[key])
                 for i in range(self.n_envs):
                     arrays = {k: (np.stack(v, axis=1) if k == "density" else np.asarray(v, dtype=np.float32)) for k, v in recs[i].items()}
-                    m = episode_metrics(arrays, self.dt_ctrl, float(self.x_grid[1] - self.x_grid[0]) / 1000.0)
+                    m = episode_metrics(arrays, self.dt_ctrl, float(self.x_grid[1] - self.x_grid[0]) / 1000.0,
+                                        breakdown_density=self.breakdown_density_veh_km)
                     m["profile_index"] = int(prof[i].index); m["profile_set"] = prof[i].set_name
                     results.append(m)
         finally:

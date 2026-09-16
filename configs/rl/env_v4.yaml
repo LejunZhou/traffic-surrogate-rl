@@ -1,0 +1,14 @@
+# Overlay: scenario v4 (M15, three-lane mainline) for either environment. Apply after
+# ppo_common and the env overlay, e.g.
+#   --config configs/rl/ppo_common.yaml --overlay configs/rl/env_sumo.yaml --overlay configs/rl/env_v4.yaml
+# The study driver does this through SCENARIO=v4 MILESTONE=m15 PROFILE_SETS_DIR=configs/profiles/v3.
+env:
+  sumo_config: configs/sumo/scenario_v4.yaml
+  density_stats_from: data/plant_v4/round0/metadata.json
+  ramp_queue_max_veh: null       # no storage cap (v3b decision); the scenario file agrees
+  ramp_discharge_vph: 1200       # meter discharge D, both envs (the scenario file agrees)
+  ramp_stopline_offset_m: 200.0
+  network_dir: data/raw/rl_network_v4
+  profiles: {family: configs/profiles/family_v3.yaml}
+  eval_profiles: configs/profiles/v3/val.json
+  observation: {demand_norm: 6000.0}   # mainline demand feature d / ~capacity (v3b: 2500); ramp_norm 1000 and the rest from ppo_common
