@@ -24,6 +24,7 @@ network:
   ramp_length_m: 200.0
   speed_limit_mps: 33.33
   ramp_speed_limit_mps: 33.33          # 120 km/h (same as the mainline)
+  ramp_entry_angle_deg: 10.0           # freeway-style shallow entry; at 30° (v2/v3 default) netconvert caps the merge link at 9.18 m/s (M14 progress §13)
   acceleration_lane_length_m: 100.0
   num_lanes: 1
 

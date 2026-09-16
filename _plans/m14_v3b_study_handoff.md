@@ -40,7 +40,7 @@ Scenario selection is automatic: the driver exports `SCENARIO_OVERLAY=configs/rl
 runs/study/v3b/env_study.yaml` and `PROFILE_SETS_DIR=configs/profiles/v2`; do not run the
 individual scripts for v3b without those two variables.
 
-## What to record when it finishes (progress file §13, "v3b study")
+## What to record when it finishes (progress file §14, "v3b study"; §13 = the 10° ramp-entry change)
 1. Round-0 gate (val and test): return error, false-breakdown rate, calibration slope, pass/fail
    (v2 at 692 rollouts: 0.06–0.11 / 0 / in range; at 240: 0.078–0.081 false breakdown).
 2. Per round: SUMO breakdown rate of the top-3, gap surrogate − SUMO, best V return,

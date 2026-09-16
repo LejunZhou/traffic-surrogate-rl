@@ -50,7 +50,7 @@ plt.rcParams.update({"font.size": 9, "axes.edgecolor": MUTED, "axes.labelcolor":
                      "axes.grid": False, "grid.color": GRID, "grid.linewidth": 0.6, "legend.frameon": False})
 
 
-def _pick_representatives(rows: list[dict], cells: list[tuple[str, bool]]) -> list[dict]:
+def _pick_representatives(rows: list[dict], cells: list[tuple[str, bool]], min_n: int = 4) -> list[dict]:
     picked = []
     for group, bd in cells:
         cand = [r for r in rows if r["group"] == group and bool(r["breakdown_true"]) == bd]
@@ -58,6 +58,17 @@ def _pick_representatives(rows: list[dict], cells: list[tuple[str, bool]]) -> li
             continue
         cand.sort(key=lambda r: r["return_rel_err"])
         picked.append(cand[len(cand) // 2])
+    if len(picked) < min_n and len(rows) >= min_n:
+        # a split with one regime (e.g. the on-policy rollouts of an aggregation round): show the
+        # return-error quantiles instead of one median case -- median, 75 %, 90 % and the worst
+        cand = sorted(rows, key=lambda r: r["return_rel_err"])
+        qs = [0.5, 0.75, 0.9, 1.0][: min_n]
+        picked = []
+        for q in qs:
+            r = dict(cand[min(int(round(q * (len(cand) - 1))), len(cand) - 1)])
+            r["group"] = f"{r['group']} q{int(q * 100)}"
+            if r["file"] not in [x["file"] for x in picked]:
+                picked.append(r)
     return picked
 
 
@@ -71,7 +82,7 @@ def _predict(ens: DeepONetEnsemble, store: Path, fn: str):
 
 def fig_fields(ens, store, reps, out: Path) -> None:
     n = len(reps)
-    fig, axes = plt.subplots(n, 4, figsize=(13, 2.6 * n), dpi=150, constrained_layout=True)
+    fig, axes = plt.subplots(n, 4, figsize=(13, 2.6 * n), dpi=150, constrained_layout=True, squeeze=False)
     t_min = np.arange(ens.K) * ens.dt / 60.0
     extent = [t_min[0], t_min[-1] + ens.dt / 60.0, ens.x_grid[0] - 50, ens.x_grid[-1] + 50]
     for i, r in enumerate(reps):
@@ -106,7 +117,7 @@ def fig_fields(ens, store, reps, out: Path) -> None:
 
 def fig_exit_flow(ens, store, reps, out: Path) -> None:
     n = len(reps)
-    fig, axes = plt.subplots(2, n, figsize=(3.4 * n, 5.2), dpi=150, constrained_layout=True, sharex=True)
+    fig, axes = plt.subplots(2, n, figsize=(3.4 * n, 5.2), dpi=150, constrained_layout=True, sharex=True, squeeze=False)
     t_min = np.arange(ens.K) * ens.dt / 60.0
     for i, r in enumerate(reps):
         arrays, meta, rho_m, q_m = _predict(ens, store, r["file"])
@@ -136,7 +147,7 @@ def fig_exit_flow(ens, store, reps, out: Path) -> None:
 def fig_cells(ens, store, reps, out: Path, cells_m=(1000.0, 1300.0, 1700.0)) -> None:
     n = len(reps)
     fig, axes = plt.subplots(n, len(cells_m), figsize=(3.6 * len(cells_m), 2.3 * n), dpi=150,
-                             constrained_layout=True, sharex=True)
+                             constrained_layout=True, sharex=True, squeeze=False)
     t_min = np.arange(ens.K) * ens.dt / 60.0
     idx = [int(np.argmin(np.abs(ens.x_grid - c))) for c in cells_m]
     for i, r in enumerate(reps):
@@ -208,7 +219,7 @@ def fig_error_map(ens, store, files, out: Path) -> dict:
 def fig_case_studies(ens, store, reps, out: Path) -> None:
     """One column per rollout: demand, metering rate, ramp inflow, SUMO density, predicted density, exit flow."""
     n = len(reps)
-    fig, axes = plt.subplots(6, n, figsize=(3.6 * n, 14.5), dpi=150, constrained_layout=True, sharex="col",
+    fig, axes = plt.subplots(6, n, figsize=(3.6 * n, 14.5), dpi=150, constrained_layout=True, sharex="col", squeeze=False,
                              gridspec_kw={"height_ratios": [1.1, 0.7, 0.9, 1.4, 1.4, 1.1]})
     t_min = np.arange(ens.K) * ens.dt / 60.0
     extent = [t_min[0], t_min[-1] + ens.dt / 60.0, ens.x_grid[0] - 50, ens.x_grid[-1] + 50]

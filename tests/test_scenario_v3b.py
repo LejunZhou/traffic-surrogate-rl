@@ -39,7 +39,7 @@ def test_v3b_geometry_and_stop_line(tmp_path):
     traci.switch(env._traci_label)
     assert abs(traci.lane.getMaxSpeed("ramp_0") - 33.33) < 0.05                      # 120 km/h ramp
     ramp_len = traci.lane.getLength("ramp_0")
-    assert 180.0 < ramp_len <= 200.0
+    assert 175.0 < ramp_len <= 200.0                                                # 10° entry: the merge junction absorbs ~20 m of the 200 m edge
     env.step(np.array([1.0], dtype=np.float32))                                     # forces the depart position to resolve
     assert env._ramp_depart_pos not in (None, "free")
     assert float(env._ramp_depart_pos) == 0.0                                        # meter at the ramp start

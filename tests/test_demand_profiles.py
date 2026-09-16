@@ -54,7 +54,7 @@ def test_block_expansion_and_flow_blocks():
 
 
 def test_routes_xml_one_flow_per_block(tmp_path):
-    cfg = yaml.safe_load((ROOT / "configs/sumo/scenario_v2.yaml").read_text())
+    cfg = yaml.safe_load((ROOT / "configs/sumo/scenario_v2.yaml").read_text(encoding="utf-8"))
     p = DemandProfile(np.linspace(1300, 2200, 12).astype(np.float32), np.full(12, 500.0, np.float32))
     out = tmp_path / "routes.rou.xml"
     _write_routes(out, cfg, p.mainline_flow_blocks())

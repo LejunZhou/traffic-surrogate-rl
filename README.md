@@ -75,11 +75,12 @@ sh scripts/run_study.sh          # E2 parity, aggregation loop, ALINEA tuning, d
 STUDY=paper STEPS_PER_ROUND=1000000 ROUNDS=4 DIRECT_EE="200 700 2000" SEEDS="0 1 2" sh scripts/run_study.sh
 # scenario v3 (M14): 60 km/h ramp, stop line 100 m before the merge, 28-vehicle ramp storage enforced in both envs;
 # add `--overlay configs/rl/env_v3.yaml` to any train_ppo call, or use configs/experiments/round0_v3.yaml for the data stages
-# scenario v3b (M14, current): simulated ramp = 100 m acceleration segment at 120 km/h, meter at its start (D = 900 veh/h),
+# scenario v3b (M14, current): simulated ramp = 200 m acceleration segment at 120 km/h joining at 10 deg, meter at its start (D = 1200 veh/h),
 # uncapped virtual queue priced by the TTS reward, merge-station density from the through lane only;
-# demand family v2 (configs/profiles/family_v2.yaml, frozen sets configs/profiles/v2/: all peaks/surges over by minute 45, surge <= 600 veh/h);
+# demand family v2 (configs/profiles/family_v2.yaml, frozen sets configs/profiles/v2/: all peaks/surges over by minute 45, surge <= 800 veh/h);
 # overlay configs/rl/env_v3b.yaml, data config configs/experiments/round0_v3b.yaml; layout figure _progress/figures/m14_v3b_road_layout.png
 # v3b study: sh scripts/run_v3b_study.sh (SMOKE=1 for a 20-min end-to-end check; SCENARIO_OVERLAY / PROFILE_SETS_DIR select the scenario)
+# v3b demo result (2026-09-15, seed 0, 5 rounds, stop rule fired at 5): A1 aggregation -41.0..-41.5 on T from 854 EE on vs tuned PI-ALINEA -46.4 (+5 [3, 7]), direct PPO -50.2 at 855 EE and -74.4 at 290 EE; _progress/m14_scenario_v3_progress.md s14
 sh scripts/run_m13.sh            # M13: how small can round 0 be? 240-rollout stores (original vs closed-loop-heavy
                                  # mixture, no run-7 policy) + aggregation until the stop rule; figures in _progress/figures/m13
 ```

@@ -78,3 +78,8 @@ the reward's flow cap together. Revisit before the paper-scale runs.
 - E0 characterisation on v3b run 2026-09-14 (progress §9, §11); single-constant gate added (§12).
 - Study driver `scripts/run_v3b_study.sh` (scenario overlay + profile sets via environment
   variables, smoke mode); the v3b study itself runs on the user's Windows machine.
+- Ramp entry angle 10° (user, 2026-09-15): at the 30° default netconvert caps the merge
+  junction's internal link at 9.18 m/s, so ramp vehicles braked to 33 km/h at the nose on
+  every scenario so far (progress §13). `network.ramp_entry_angle_deg` (builder default 30
+  keeps v2/v3 nets bit-identical); v3b sets 10 → 97 km/h at the nose. The v3b E0 report
+  (§11) predates this and must be re-run before any v3b study.

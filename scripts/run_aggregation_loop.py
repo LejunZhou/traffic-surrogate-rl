@@ -101,13 +101,19 @@ def main() -> None:
     ap.add_argument("--val-set", default="val")
     ap.add_argument("--out-dir", default=None)
     ap.add_argument("--skip-finetune", action="store_true", help="ablation: aggregation rollouts without model updates")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue an interrupted study: keep the rounds recorded in rounds.json whose selected checkpoint and "
+                         "fine-tuned ensemble exist, discard a half-finished next round, and carry on from there")
     args = ap.parse_args()
 
     study_dir = PROJECT_ROOT / (args.out_dir or f"runs/aggregation/{args.study}")
     study_dir.mkdir(parents=True, exist_ok=True)
     ledger = Ledger(args.study, PROJECT_ROOT)
     base_store = RolloutStore(PROJECT_ROOT / args.store)
-    store = base_store.fork(study_dir / "store")
+    if args.resume and (study_dir / "store" / "index.json").exists():
+        store = RolloutStore(study_dir / "store")            # keeps the aggregation rounds already appended
+    else:
+        store = base_store.fork(study_dir / "store")
     dataset_ee = sum(1 for e in base_store.entries if e["round"] == 0)
     profiles = load_set(args.val_set, PROJECT_ROOT)
     rcfg = merge_configs(load_config(str(PROJECT_ROOT / args.config)), load_config(str(PROJECT_ROOT / args.overlay)))
@@ -122,8 +128,28 @@ def main() -> None:
     best_prev = -np.inf
     bad_rounds = 0
     stopped_by_rule = False
+    start_round = 1
+    if args.resume and (study_dir / "rounds.json").exists():
+        done = [r for r in json.loads((study_dir / "rounds.json").read_text())
+                if Path(r["selected_path"]).exists() and (Path(r["ensemble_after"]) / "manifest.json").exists()]
+        if done:
+            rounds_log = done
+            last = rounds_log[-1]
+            ensemble_dir = Path(last["ensemble_after"])
+            init_policy = Path(last["selected_path"])
+            best_prev = max(float(r["best_sumo_val"]) for r in rounds_log)
+            bad_rounds = int(last.get("bad_rounds", 0))
+            stopped_by_rule = bad_rounds >= args.stop_patience
+            start_round = int(last["round"]) + 1
+            for stale in (study_dir / f"ppo_r{start_round}", study_dir / f"rollouts_r{start_round}", study_dir / f"ensemble_r{start_round}"):
+                shutil.rmtree(stale, ignore_errors=True)
+            (study_dir / f"ppo_r{start_round}.log").unlink(missing_ok=True)
+            print(f"[resume] {len(rounds_log)} completed round(s) kept (best SUMO V {best_prev:.1f}, bad rounds {bad_rounds}); "
+                  f"continuing from round {start_round} with ensemble {ensemble_dir.name} and policy {init_policy.name}", flush=True)
     t_study = time.time()
-    for j in range(1, args.rounds + 1):
+    for j in range(start_round, args.rounds + 1):
+        if stopped_by_rule:
+            break
         t0 = time.time()
         print(f"\n===== {args.study}: round {j} / {args.rounds}  (ensemble {ensemble_dir.name}, store {len(store)} rollouts) =====", flush=True)
         # 1. PPO on the surrogate

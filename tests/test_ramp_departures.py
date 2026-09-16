@@ -76,7 +76,7 @@ class DelayedTraCI:
 
 @pytest.fixture
 def config():
-    cfg = yaml.safe_load((ROOT / "configs/sumo/phase1_1.yaml").read_text())
+    cfg = yaml.safe_load((ROOT / "configs/sumo/phase1_1.yaml").read_text(encoding="utf-8"))
     cfg["simulation"].update(duration_s=16, dt_ctrl_s=4, step_length_s=1)
     cfg["demand"].update(ramp_demand_vph=900, ramp_discharge_vph=3600)
     return cfg

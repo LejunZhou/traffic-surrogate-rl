@@ -15,7 +15,8 @@ Network topology (all coordinates in metres):
                         --[highway_post, 1500 m]--> downstream(2000,0)
 
 The ramp_start position is chosen so the ramp edge length ≈ 200 m
-(30° approach angle: sqrt(173² + 100²) ≈ 200 m).
+(approach angle `network.ramp_entry_angle_deg`, default 30°: sqrt(173² + 100²) ≈ 200 m;
+v3b uses 10° so that netconvert does not cap the merge link speed).
 
 Junction type at merge is "priority": mainline edges (priority=10) have
 right-of-way over the ramp (priority=5), which is standard for ramp metering.
@@ -85,8 +86,11 @@ def _write_nodes(path: Path, net_cfg: dict) -> None:
     hw_len = net_cfg["highway_length_m"]
     accel_len = _acceleration_lane_length(net_cfg)
 
-    # Place ramp_start at 30° approach angle so edge length ≈ ramp_len.
-    angle = math.radians(30)
+    # Place ramp_start at the configured approach angle so edge length ≈ ramp_len.
+    # netconvert caps the speed of the merge junction's internal link from this
+    # angle (junctions.limit-turn-speed): 30° → 9.18 m/s, i.e. ramp vehicles brake
+    # to 33 km/h at the nose; ≤ 10° keeps the link at the lane speed (v3b, M14 progress §13).
+    angle = math.radians(float(net_cfg.get("ramp_entry_angle_deg", 30.0)))
     rx = ramp_pos - ramp_len * math.cos(angle)
     ry = -ramp_len * math.sin(angle)
 

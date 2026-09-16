@@ -19,6 +19,7 @@ cd "$(dirname "$0")/.."
 # netconvert on PATH
 [ -d .venv-traffic-rl/bin ] && export PATH="$PWD/.venv-traffic-rl/bin:$PATH"
 [ -d .venv-traffic-rl/Scripts ] && export PATH="$PWD/.venv-traffic-rl/Scripts:$PATH"
+[ -x .venv-traffic-rl/python.exe ] && export PATH="$PWD/.venv-traffic-rl:$PATH"   # Windows conda env: python.exe sits at the env root
 export PYTHONPATH=src
 command -v sumo >/dev/null 2>&1 || { echo "sumo not on PATH (activate the project env or install eclipse-sumo)"; exit 1; }
 SCENARIO=${SCENARIO:-v3b}

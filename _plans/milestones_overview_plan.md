@@ -42,7 +42,13 @@ Draft decisions taken without the user (flagged in the progress files):
 TTS-form training reward (E0 finding), GRU branch by default (CPU speed),
 occupancy divisor 5 m + jam clip. The proposal.md revision (Appendix D.1) still
 needs approval.
-14. M14 Scenario v3 — `m14_scenario_v3_plan.md`: realistic metered ramp (60 km/h, stop
-    line 100 m before the nose, 28-vehicle storage cap enforced as an actuator constraint
-    in both envs); implemented and tested 2026-09-14, E0 characterised; study re-run pending
-    the user's go.
+14. M14 Scenario v3/v3b — `m14_scenario_v3_plan.md`: realistic metered ramp. v3 (60 km/h
+    ramp, mid-ramp stop line, 28-veh cap) superseded by v3b: 200 m acceleration ramp at
+    120 km/h joining at 10°, meter at its start (D = 1200 veh/h), uncapped virtual queue,
+    through-lane merge density, demand family v2; implemented and tested 2026-09-14/15,
+    E0 characterised (gate still fails on step profiles: grid timing). Study run 2026-09-15
+    (10° ramp entry, seed 0, 3 rounds, demo scale): round-0 gate passed both splits; A1
+    aggregation ≈ −41 on T from 854 EE on (5 rounds, stop rule fired at round 5, plateau holds on
+    T/O) vs tuned PI-ALINEA −46.4 (+5 [+3, +7]), ≈ +7 on O;
+    direct PPO −50.2 at 855 EE (8.6 behind A1 at equal budget) and −74.4 at 290 EE. Study
+    complete, progress §14. Open: seeds 1–2, paper scale.
