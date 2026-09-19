@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "m14-ramp-metering"
+version = "0.1.0"
+description = "M14: causal GRU DeepONet and PPO for freeway ramp metering"
+requires-python = ">=3.11"
+dependencies = [
+  "torch>=2.0", "stable-baselines3>=2.0", "gymnasium>=0.29",
+  "numpy", "matplotlib", "PyYAML", "traci>=1.18", "sumolib>=1.18",
+]
+
+[project.optional-dependencies]
+sumo = ["eclipse-sumo==1.27.1", "traci==1.27.1", "sumolib==1.27.1"]
+dev = ["pytest>=7"]
+tracking = ["wandb"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

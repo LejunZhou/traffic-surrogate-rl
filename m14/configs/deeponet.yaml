@@ -1,0 +1,47 @@
+# Causal GRU DeepONet ensemble. The density band weight adds 2 to the base weight 1.
+data:
+  store_dir: data/round0
+  sumo_config: configs/scenario.yaml
+  n_query_points: 512
+  mode: causal
+  band:
+    rho_min: 40.0
+    x_max_m: 1400.0
+    weight: 2.0
+  outflow_weight: 1.0
+  normalisers:
+    mainline_demand: 2500.0
+    ramp_inflow: 1600.0
+    flow: 2500.0
+model:
+  branch:
+    type: gru
+    hidden: 128
+    layers: 2
+    latent_dim: 256
+  trunk:
+    hidden_dim: 512
+    layers: 3
+    latent_dim: 256
+    fourier_features: 0
+ensemble:
+  members: 5
+  bootstrap: true
+training:
+  n_epochs: 300
+  lr: 0.001
+  schedule: cosine
+  warmup_epochs: 5
+  weight_decay: 1.0e-06
+  batch_size: 16
+  grad_clip_norm: 1.0
+  eval_every: 5
+  seed: 0
+  num_threads: 2
+  select_on: val_rel_l2
+finetune:
+  epochs: 20
+  lr: 0.0003
+output:
+  base_dir: runs/deeponet
+  run_name: round0

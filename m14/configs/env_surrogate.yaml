@@ -1,0 +1,16 @@
+# Overlay: train PPO in 16 batched surrogate environments; sample one model per episode.
+env:
+  type: surrogate
+  ensemble_dir: runs/deeponet/round0
+  ensemble_mode: sample
+  pessimistic_kappa: 1.0
+  n_envs: 16
+  device: cpu
+  density_clip_max: 143.0
+  outflow_clip_max: 3000.0
+training:
+  total_timesteps: 1000000
+  eval_freq: 24000
+  eval_ensemble_mode: mean
+output:
+  run_name: surrogate

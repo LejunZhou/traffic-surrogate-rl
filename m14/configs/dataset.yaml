@@ -1,0 +1,45 @@
+# Initial data: 288 mixture trajectories, in addition to the 404 E0 screening trajectories.
+env:
+  sumo_config: configs/scenario.yaml
+  profiles:
+    family: configs/demand.yaml
+  density_mean: 20.0
+  density_std: 12.0
+  queue_norm_scale: 100.0
+  observation:
+    lookahead_steps: 0
+  reward:
+    form: tts
+    tts_scale: 1.0
+    dx_km: 0.1
+    delta: 3.572
+    beta: 1.0
+    gamma: 0.063
+    q_ref: 2476.0
+    q_ref_mode: offered
+    q_cap: 2476.0
+    queue_norm: 400.0
+    sigma_ref: 6.0
+    warmup_s: 90
+dataset:
+  n_rollouts: 288
+  seed: 14
+  sumo_seed_base: 72000
+  per_entry_seeds: true
+  storage_mandatory_frac: 0.5
+  storage_mandatory_vph: 2500
+  mixture:
+    alinea_wide: 0.25
+    alinea_dither: 0.15
+    store_flush: 0.25
+    feedforward: 0.15
+    random_signal: 0.1
+    constant: 0.1
+splits:
+  train_frac: 0.7
+  val_frac: 0.15
+  seed: 0
+output:
+  store_dir: data/round0
+  network_dir: data/networks/dataset
+  workers: 8

@@ -1,0 +1,81 @@
+# Shared PPO settings. Combine with env_sumo.yaml or env_surrogate.yaml; M14 values are explicit here.
+env:
+  sumo_config: configs/scenario.yaml
+  profiles:
+    family: configs/demand.yaml
+  observation:
+    lookahead_steps: 0
+    demand_norm: 2500.0
+    ramp_norm: 1000.0
+    clip:
+    - -3.0
+    - 25.0
+  observe_ramp_demand: true
+  density_mean: auto
+  density_std: auto
+  density_stats_from: data/round0/metadata.json
+  queue_norm_scale: 100.0
+  ramp_discharge_vph: 1200.0
+  symmetric_action: true
+  reward:
+    form: tts
+    tts_scale: 1.0
+    dx_km: 0.1
+    delta: 3.572
+    beta: 1.0
+    gamma: 0.063
+    q_ref: 2476.0
+    q_ref_mode: offered
+    q_cap: 2476.0
+    queue_norm: 400.0
+    sigma_ref: 6.0
+    warmup_s: 90
+    terminal_queue_weight: 0.0
+  ramp_queue_max_veh: null
+  ramp_stopline_offset_m: 200.0
+  eval_profiles: configs/profiles/val.json
+ppo:
+  policy: MlpPolicy
+  policy_kwargs:
+    net_arch:
+      pi:
+      - 512
+      - 512
+      - 512
+      vf:
+      - 512
+      - 512
+      - 512
+    activation_fn: tanh
+    log_std_init: -2.0
+  n_steps: 480
+  batch_size: 120
+  n_epochs: 5
+  learning_rate: 0.0001
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: 0.02
+  device: cpu
+  verbose: 1
+training:
+  seed: 0
+  total_timesteps: 1000000
+  eval_freq: 24000
+  checkpoint_every_eval: true
+  eval_profiles: configs/profiles/val.json
+  eval_seed: 10000
+  action_init_u: 0.3
+  progress_bar: false
+  wandb_info_log_freq: 1000
+output:
+  base_dir: runs/ppo
+  run_name: m14
+  wandb:
+    enabled: false
+    project: m14-ramp-metering
+    tags:
+    - m14

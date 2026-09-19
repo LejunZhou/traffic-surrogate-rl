@@ -1,0 +1,44 @@
+# M14 v3b: fixed road geometry, SUMO timing, meter capacity, and detectors.
+network:
+  highway_length_m: 2000.0
+  ramp_position_m: 1300.0
+  ramp_length_m: 200.0
+  speed_limit_mps: 33.33
+  ramp_speed_limit_mps: 33.33
+  ramp_entry_angle_deg: 10.0
+  acceleration_lane_length_m: 100.0
+  num_lanes: 1
+simulation:
+  duration_s: 3600
+  step_length_s: 1
+  dt_ctrl_s: 30
+  seed: 42
+  sumo_binary: sumo
+  max_depart_delay_s: -1
+  sumo_extra_args:
+  - --extrapolate-departpos
+demand:
+  mainline_demand_vph: 2000
+  ramp_demand_vph: 800
+  ramp_discharge_vph: 1200
+  ramp_model: metered_queue
+  demand_profile: profile
+  ramp_stopline_offset_m: 200.0
+  ramp_queue_max_veh: null
+vehicle:
+  idm_tau_s: 1.0
+  depart_speed: desired
+  speed_dev: 0.03
+  min_gap_m: 2.0
+detectors:
+  n_detectors: 19
+  spacing_m: 100.0
+  start_position_m: 100.0
+  vehicle_length_m: 5.0
+  density_method: occupancy
+  merge_station_lanes: mainline
+  occupancy_effective_length_m: 5.0
+  jam_density_veh_km: 142.857
+output:
+  raw_dir: data/rollouts
+  network_dir: data/networks/default

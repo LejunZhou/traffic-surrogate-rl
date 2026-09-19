@@ -1,0 +1,204 @@
+"""
+Plotting utilities for surrogate evaluation and RL training analysis.
+
+Functions:
+- plot_trajectory:    single-trajectory density heatmap (x vs t) — Milestone 1
+- plot_density_heatmap: predicted-vs-true density heatmap (x vs t) — Milestone 3+
+- plot_control_sequence: ramp-metering action sequence over time
+- plot_reward_curve: PPO training reward over environment steps
+- plot_comparison_bar: comparison bar chart across policies and metrics
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+def plot_trajectory(
+    density: np.ndarray,
+    x_grid: np.ndarray,
+    t_grid: np.ndarray,
+    output_path: str | Path,
+    title: str = "Traffic density — SUMO rollout",
+) -> None:
+    """Plot a single density trajectory as a space–time heatmap.
+
+    Used in Milestone 1 as the diagnostic output for one simulation rollout.
+    x-axis = time [s], y-axis = position [m], colour = density [veh/km].
+
+    Args:
+        density:     shape (N_x, T_ctrl) — density in veh/km
+        x_grid:      shape (N_x,)  — detector positions in metres
+        t_grid:      shape (T_ctrl,) — time points in seconds
+        output_path: Save location for the plot (.png).
+        title:       Plot title string.
+    """
+    fig, ax = plt.subplots(figsize=(10, 4))
+
+    t_min, t_max = float(t_grid[0]), float(t_grid[-1])
+    x_min, x_max = float(x_grid[0]), float(x_grid[-1])
+
+    im = ax.imshow(
+        density,
+        aspect="auto",
+        origin="lower",
+        extent=[t_min, t_max, x_min, x_max],
+        cmap="hot_r",
+        interpolation="nearest",
+    )
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Density [veh/km]", fontsize=11)
+
+    ax.set_xlabel("Time [s]", fontsize=11)
+    ax.set_ylabel("Position [m]", fontsize=11)
+    ax.set_title(title, fontsize=12)
+
+    fig.tight_layout()
+    fig.savefig(str(output_path), dpi=150)
+    plt.close(fig)
+
+
+# TODO: implement plotting functions (Milestones 3–7)
+
+
+def plot_density_heatmap(
+    predicted: np.ndarray,
+    true: np.ndarray,
+    x_grid: np.ndarray,
+    t_grid: np.ndarray,
+    output_path: str | Path,
+) -> None:
+    """Plot side-by-side predicted and true density heatmaps.
+
+    Args:
+        predicted: shape (N_x, T_ctrl) — surrogate predictions (physical units)
+        true:      shape (N_x, T_ctrl) — SUMO ground truth (physical units)
+        x_grid:    shape (N_x,) — detector positions in metres
+        t_grid:    shape (T_ctrl,) — time points in seconds
+        output_path: Save location for the plot (.png).
+    """
+    err = predicted - true
+    vmin = float(min(np.min(predicted), np.min(true)))
+    vmax = float(max(np.max(predicted), np.max(true)))
+    err_abs = float(np.max(np.abs(err)))
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4), constrained_layout=True)
+    t_min, t_max = float(t_grid[0]), float(t_grid[-1])
+    x_min, x_max = float(x_grid[0]), float(x_grid[-1])
+    if np.isclose(t_min, t_max):
+        t_min -= 0.5
+        t_max += 0.5
+    if np.isclose(x_min, x_max):
+        x_min -= 0.5
+        x_max += 0.5
+    extent = [t_min, t_max, x_min, x_max]
+
+    im0 = axes[0].imshow(
+        true,
+        aspect="auto",
+        origin="lower",
+        extent=extent,
+        cmap="hot_r",
+        vmin=vmin,
+        vmax=vmax,
+        interpolation="nearest",
+    )
+    axes[0].set_title("SUMO true")
+    axes[0].set_xlabel("Time [s]")
+    axes[0].set_ylabel("Position [m]")
+    fig.colorbar(im0, ax=axes[0], label="Density [veh/km]")
+
+    im1 = axes[1].imshow(
+        predicted,
+        aspect="auto",
+        origin="lower",
+        extent=extent,
+        cmap="hot_r",
+        vmin=vmin,
+        vmax=vmax,
+        interpolation="nearest",
+    )
+    axes[1].set_title("DeepONet predicted")
+    axes[1].set_xlabel("Time [s]")
+    fig.colorbar(im1, ax=axes[1], label="Density [veh/km]")
+
+    im2 = axes[2].imshow(
+        err,
+        aspect="auto",
+        origin="lower",
+        extent=extent,
+        cmap="coolwarm",
+        vmin=-err_abs,
+        vmax=err_abs,
+        interpolation="nearest",
+    )
+    axes[2].set_title("Prediction error")
+    axes[2].set_xlabel("Time [s]")
+    fig.colorbar(im2, ax=axes[2], label="Pred - true")
+
+    fig.savefig(str(output_path), dpi=150)
+    plt.close(fig)
+
+
+def plot_control_sequence(
+    actions: np.ndarray,
+    t_grid: np.ndarray,
+    output_path: str | Path,
+    title: str = "Ramp metering control",
+) -> None:
+    """Plot the ramp-metering action sequence over time.
+
+    Args:
+        actions: shape (T_ctrl,) ramp metering rates in [0, 1].
+        t_grid: shape (T_ctrl,) time points in seconds.
+        output_path: Save location for the plot (.png).
+        title: Plot title string.
+    """
+    actions_arr = np.asarray(actions, dtype=np.float32).reshape(-1)
+    t_arr = np.asarray(t_grid, dtype=np.float32).reshape(-1)
+    if actions_arr.shape != t_arr.shape:
+        raise ValueError(
+            "actions and t_grid must have the same shape, got "
+            f"{actions_arr.shape} and {t_arr.shape}"
+        )
+
+    fig, ax = plt.subplots(figsize=(10, 3))
+    ax.step(t_arr, actions_arr, where="post", linewidth=1.8)
+    ax.set_xlabel("Time [s]", fontsize=11)
+    ax.set_ylabel("Ramp rate", fontsize=11)
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_title(title, fontsize=12)
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(str(output_path), dpi=150)
+    plt.close(fig)
+
+
+def plot_reward_curve(
+    rewards: list[float],
+    output_path: str | Path,
+    label: str = "PPO",
+) -> None:
+    """Plot episode reward over training steps.
+
+    Args:
+        rewards: List of per-episode total rewards.
+        output_path: Save location for the plot (.png).
+        label: Legend label for the curve.
+    """
+    raise NotImplementedError
+
+
+def plot_comparison_bar(
+    results: dict[str, dict[str, float]],
+    output_path: str | Path,
+) -> None:
+    """Plot grouped bar chart comparing metrics across policies.
+
+    Args:
+        results: {policy_name: {metric_name: value, ...}, ...}
+        output_path: Save location for the plot (.png).
+    """
+    raise NotImplementedError

@@ -1,0 +1,10 @@
+# Overlay: train the same PPO policy directly in SUMO.
+env:
+  type: sumo
+  sumo_binary: sumo
+  network_dir: data/networks/ppo
+training:
+  total_timesteps: 24000
+  eval_freq: 2400
+output:
+  run_name: sumo
