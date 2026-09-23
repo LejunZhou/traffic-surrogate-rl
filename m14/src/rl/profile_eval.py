@@ -193,6 +193,28 @@ def _restore_results(rows: list[dict], jobs: list[dict]) -> list[dict]:
     return results
 
 
+def _move_interrupted_request(out_jsonl: Path, sidecar: Path, summary_path: Path, rollouts_dir: Path | None) -> None:
+    """Opt-in (M14_RECOVER_INTERRUPTED=1) recovery of a request whose process died while running.
+
+    Safe only because results are published in a fixed order: JSONL, summary, ledger rows, then the
+    'complete' marker. A 'running' marker without the JSONL therefore means no ledger row was written
+    and no episode was charged, so the request can simply run again. Its files are moved, not deleted."""
+    try:
+        status = json.loads(sidecar.read_text()).get("status")
+    except (OSError, ValueError, AttributeError):
+        status = "unreadable"                     # the marker itself was cut off mid-write
+    if status == "complete":
+        return                                    # published output missing: leave it to the normal checks
+    aside = out_jsonl.parent / f"{out_jsonl.stem}.interrupted_{int(time.time())}"
+    aside.mkdir(parents=True)
+    for path in (sidecar, summary_path):
+        if path.exists():
+            path.replace(aside / path.name)
+    if rollouts_dir is not None and Path(rollouts_dir).exists():
+        Path(rollouts_dir).replace(aside / "rollouts")
+    print(f"Recovered interrupted evaluation request {out_jsonl.name} (marker '{status}'); moved to {aside}", flush=True)
+
+
 def evaluate_on_profiles(policies: list[str], profiles: list[DemandProfile], env_cfg: dict, out_jsonl: Path,
                          seeds: list[int] | None = None, workers: int = 8, purpose: str = "eval_val", study: str = "eval",
                          round_index: int = 0, save_rollouts_dir: Path | None = None, project_root: Path | None = None,
@@ -233,6 +255,8 @@ def evaluate_on_profiles(policies: list[str], profiles: list[DemandProfile], env
     fingerprint = hashlib.sha256(_canonical_json(request).encode("utf-8")).hexdigest()
     sidecar = out_jsonl.with_suffix(".request.json")
     summary_path = out_jsonl.with_suffix(".summary.json")
+    if os.environ.get("M14_RECOVER_INTERRUPTED") == "1" and sidecar.exists() and not out_jsonl.exists():
+        _move_interrupted_request(out_jsonl, sidecar, summary_path, save_rollouts_dir)
     existing = any(p.exists() for p in (out_jsonl, sidecar, summary_path))
     if existing:
         try:

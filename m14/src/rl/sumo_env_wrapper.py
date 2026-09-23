@@ -491,7 +491,6 @@ class SumoEnv(gym.Env):
         self._queue_override_steps += int(queue_override)
         density, speed, flow, interval_info = self._advance_control_interval(ramp_rate, r_k)
         self.current_density = density
-        queue_length = float(interval_info.get("interval_queue_mean", 0.0))
         # Mainline outflow = vehicles that left the network during this
         # control interval (traci.simulation.getArrivedNumber, summed over
         # the 30 sub-steps). This is an exact count. The E1 loop flow at
@@ -509,6 +508,9 @@ class SumoEnv(gym.Env):
         self._cum_served += outflow_vph * dt_h
         on_road = float(np.sum(density)) * self.dx_km
         queue_end = float(self._virtual_queue_length)
+        # reward charges the end-of-interval queue Q_{k+1}, as SurrogateVecEnv does
+        # (the interval average stays in info as interval_queue_mean)
+        queue_length = queue_end
         queue_cap_exceeded = bool(self.ramp_queue_max_veh is not None and queue_end > self.ramp_queue_max_veh + 0.5)
         self._queue_cap_exceeded_steps += int(queue_cap_exceeded)
         backlog = backlog_estimate(self._cum_offered, self._cum_served, on_road, queue_end)

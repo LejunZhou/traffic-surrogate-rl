@@ -551,3 +551,165 @@ in rounds 5–6) and the gap steady at +2.1. The `study.json` A1 is round 5 by t
 rounds 3–5 are statistically indistinguishable, so the honest headline is "A1 ≈ −41 on T from 854 EE
 on, +5 over tuned ALINEA, +9 over direct PPO at the same budget". Paper-scale setting confirmed: 4–5
 rounds with δ = 2, patience 2.
+
+**Relative TTS reduction vs tuned PI-ALINEA (2026-09-16, for the paper sentence).** Paired over the
+same (profile, SUMO seed) episodes of the final evaluation (`runs/study/v3b/eval/*.jsonl`; T = 90
+episodes, O = 36), 1 − mean(TTS_A1) / mean(TTS_ALINEA), 95 % CI by paired bootstrap (5000
+resamples). "return" is the training reward (−TTS, 90 s warm-up masked), "TTS" the full-episode
+`tts_veh_h` metric; both agree within 0.7 points.
+
+| arm | T, return | T, TTS | O, return | O, TTS |
+|---|---|---|---|---|
+| A1 round 3 (854 EE) | 10.2 % [6.8, 13.5] | 10.5 % [6.9, 14.0] | 10.6 % [5.3, 15.0] | 10.6 % [5.2, 15.1] |
+| A1 round 4 (908 EE) | 11.6 % [8.5, 14.8] | 12.2 % [8.8, 15.6] | 13.5 % [9.2, 17.3] | 13.7 % [9.2, 17.4] |
+| **A1 round 5 (962 EE, `study.json` A1 by the V rule)** | 10.5 % [7.4, 13.5] | **11.1 % [7.8, 14.2]** | 12.3 % [6.9, 16.8] | **12.5 % [7.2, 17.0]** |
+| B direct SUMO PPO 700 EE (855 EE) | −8.2 % [−13.2, −3.1] | −10.2 % [−15.8, −4.5] | 3.7 % [−2.9, 8.9] | 2.7 % [−4.5, 8.4] |
+
+Headline (selected arm, full-episode TTS): **11 % on T and 12 % on O**, seed 0, demo scale.
+
+## 15. Seed sweep, seeds 1 and 2 (launched 2026-09-16, overnight)
+`SEEDS="0 1 2" ROUNDS=5 WORKERS=10 sh scripts/run_v3b_study.sh`, detached (pid in
+`runs/logs/v3b_driver_seeds12.pid`, driver log `runs/logs/v3b_driver_seeds12.log`, stage logs
+`runs/logs/v3b_agg_s{1,2}.log`, `runs/logs/v3b_direct_{200,700}_s{1,2}.log`). Seed-0 stages
+(E0, round-0 store, ensemble, gate, ALINEA tuning, seed-0 loop and direct arms) are skipped by
+the driver's idempotence checks; seeds 1-2 run the 5-round loop (δ 2, patience 2, same round-0
+ensemble) in parallel with their 200 / 700 EE direct arms, then the manifest, final evaluation
+on T and O (existing seed-0 JSONLs reused) and figures are regenerated with all three seeds.
+Expected: aggregation loops ≈ 6-8 h; the 700 EE direct arms ≈ 14 h each (seed 0's took ≈ 14 h),
+so the driver's final stages may run into the next day. If a Windows restart interrupts it,
+rerun the same command (aggregation resumes via `--resume`, direct arms restart from scratch).
+Launched 02:59 (first attempt died at once: `sh.exe` started from PowerShell had no Git
+`usr/bin` on PATH, so `dirname` / `mkdir` were missing; relaunched with that PATH prepended).
+At 03:01: seed-0 stages skipped, gate line re-read (passed), loops s1 / s2 in round 1 of 5,
+direct 200 / 700 arms for both seeds running. **To record tomorrow:** per-seed rounds table
+(V, gap, stop round), T / O table with paired CIs vs PI-ALINEA for A1 seeds 0-2 and the
+direct arms, the seed-to-seed spread of the A1 T/O means, the relative TTS reduction per seed
+and pooled (method of the §14 addendum), and regenerated figures `_progress/figures/m14_v3b/`.
+**Crash 2026-09-16 04:19** (System event 6008: unexpected shutdown, not a Windows Update restart;
+machine back at 16:27). State at the crash: loops s1 / s2 at 292k / 300k PPO steps of round 1 (no
+completed round, so nothing to resume), direct arms at 18k / 24k (200 EE) and 20k / 84k (700 EE)
+steps, all ending with `FatalTraCIError: Connection closed by SUMO`. Partial run dirs and their
+ledgers moved to `runs/crashed_0916/` so the restarted arms count their SUMO episodes once;
+relaunched 17:03 with the same command (loops s1 / s2 in round 1, four direct arms). ≈ 1.3 h of compute lost.
+**Stopped 2026-09-16 17:1x (user decision): the seed sweep moves to Colab.** Driver process tree
+killed ≈ 10 min after the relaunch (loops s1 / s2 early in round 1, direct arms at a few k steps);
+the partial dirs of this second attempt (`runs/aggregation/v3b_s{1,2}`, `runs/study/v3b/direct_ppo_*_s{1,2}`,
+ledgers `runs/ledger/v3b_direct_*_s{1,2}.jsonl`) are throw-away and must be moved aside or deleted
+before any local rerun. The Windows machine has now lost two overnight runs to restarts (07:51 on
+09-15, 04:19 on 09-16).
+**Colab hand-off (2026-09-16 evening).** `colab/v3b_seed_sweep.ipynb`: Drive-mounted clone, SUMO from
+the `eclipse-sumo` wheel, the seed-0 bundle `runs/colab/v3b_seed0_bundle.zip` (231 MB, git-ignored:
+round-0 store, ensemble, seed-0 loop / direct / eval files, ledgers, E0 + ALINEA reports), then
+`SEEDS="0 1 2" ROUNDS=5 RESUME=1 WORKERS=$(nproc) sh scripts/run_v3b_study.sh`. New driver option
+`RESUME=1` passes `--resume` to a loop whose study dir exists (Colab session limits). The second
+local attempt's partial dirs are in `runs/crashed_0916_b/`. Results still to be recorded here.
+
+**Round-5 ensemble accuracy on the held-out splits (2026-09-16, paper table; `runs/aggregation/v3b_s0/ensemble_r5/table_metrics.json`,
+eval_val / eval_test.json).** Study-store splits (val 105, test 101 rollouts; test = round-0 controllers), mean over rollouts:
+
+| metric | validation | test |
+|---|---|---|
+| density rel-L2 | 18.2 % | 17.9 % |
+| density MAE (veh/km) | 2.36 | 2.53 |
+| exit-flow rel-L2 | 5.0 % | 5.2 % |
+| exit-flow MAE (veh/h) | 70.9 | 71.8 |
+| return relative error (mean / median) | 5.8 % / 3.4 % | 6.4 % / 4.1 % |
+| return MAE (veh h) | 4.21 | 4.68 |
+| false / missed breakdown rate | 1.9 % / 18.9 % | 1.7 % / 14.0 % |
+| true breakdown rate of the split | 50 % | 43 % |
+Gate: passed on both (return err ≤ 10 %, false breakdown ≤ 10 %, slope 1.43 / 1.35).
+
+**Controller-comparison table (2026-09-16, paper; `runs/study/v3b/eval/table_metrics.json`).** Seed 0, T = 90 / O = 36 episodes;
+mean ramp queue from the 30-s samples of the stored rollouts (OOD arrays re-generated under study `v3b_table`, identical TTS to
+the final evaluation), max queue = episode max, completed trips = network arrivals. Added arms: pure ALINEA (best of the joint
+search, `alinea:ki=20,rho=26,det=13`) and Surrogate-MPC on the round-5 ensemble (default H 20, 30 iters, TTS objective):
+TTS ID / OOD — u=0.5 77.1 / 92.6; ALINEA 42.6 / 51.1; PI-ALINEA 42.6 / 50.6; SUMO-PPO 700 EE 47.0 / 49.2; Surrogate-MPC 89.9 / 91.1
+(54 / 58 % breakdowns: the M12 §6-7 solver negative result reproduces on v3b); Surrogate-PPO r5 37.9 / 44.3. Mean queue ID:
+u=0.5 10.9, ALINEA 13.4, PI-ALINEA 13.5, SUMO-PPO 18.6, MPC 1.2, Surrogate-PPO 9.0. Costs (ledger, summed episode wall):
+ALINEA search 324 ep / 2.66 h (constants excluded), SUMO-PPO 855 / 7.18 h, Surrogate-PPO 962 / 11.08 h (E0 2.74 + round-0 1.97 +
+aggregation SUMO 2.01 + PPO 3.28 + ensemble ≈ 1.1), MPC = the ensemble's data + training (962 / ≈ 7.8 h without PPO).
+
+## 16. Direct SUMO PPO continued to 1000 EE (launched 2026-09-16 evening, user request)
+Does the direct arm catch up with more budget? `runs/logs/direct_1000_chain.sh`: warm start from
+`direct_ppo_700ee_s0/final_model.zip` (value net and optimiser kept, seed 1001 so the profile
+sequence differs), 36 000 more steps (700 → 1000 EE; the 700 EE arm was 84 000 steps), eval on V
+every 9 600 steps, ledger `v3b_direct_1000_s0`; then checkpoint selection on V among the
+continuation's checkpoints (`select_checkpoint_profiles.py`), then T / O evaluation paired against
+tuned PI-ALINEA together with A1 round 5 (`runs/study/v3b/eval/B_1000_s0_{test,ood}.jsonl`).
+Budget of the arm = 855 EE (700 EE run incl. its eval_val episodes) + this run's ledger.
+Logs: `runs/logs/v3b_direct_1000_s0.log`, `..._select_...`, `..._eval_{test,ood}.log`.
+
+**Single-case figures (2026-09-16).** `scripts/plot_plant_eval.py --case GROUP[:breakdown|nobreakdown]
+[--case-pick median|busiest|worst]` writes one landscape 1x4 case study (inputs | SUMO density | DeepONet
+density | exit flow; no std band, no metric annotations) as `fig_f_case_<group>_<bd>[_<pick>].png`:
+
+| figure dir | ensemble | rollouts | case |
+|---|---|---|---|
+| `m14_v3b_plant_r3_test/` | r3 | held-out test | `alinea_wide:breakdown` median → `r0_alinea_wide_00041` |
+| `m14_v3b_plant_r4_policy_A1/` | r4 (A1's training ensemble, out-of-sample) | A1 = `selected_r5` (ppo_r5 @ 24k) on the 18 V profiles, `rollouts_r5/aggregation_p00_val*` | median → `val003`; busiest → `val017` |
+| `m14_v3b_plant_r5_policy_A1/` | r5 (fine-tuned on those rollouts, in-sample) | same | busiest → `val017` |
+
+Rows: `ensemble_r{4,5}/eval_policy_r5_A1{,_rows}.jsonl`. r4 on A1's rollouts: rel-L2 ρ 0.342, return err
+0.236, false breakdown 0.111 (gate FAILED; the busiest case `val017` is a predicted breakdown after min 45
+that SUMO does not show). r5 on the same: 0.135 / 0.073 / 0.000 (PASSED) — this is the round-5 fine-tune
+closing the on-policy gap, but those 18 rollouts are in r5's train split, so it is not a held-out number.
+**Result (2026-09-16 22:45).** Training 20:06-22:25 (36 000 steps, 300 episodes + 54 eval_val), V evaluations −52.7 /
+−51.0 / −46.9 (9.6k / 19.2k / 28.8k steps); selection picked 28 800 steps (V −46.9; the 700 EE arm's selected checkpoint
+was ≈ −50). Total budget of the arm 855 + 354 = 1209 EE (nominal 1000). The first OOD run died on a transient TraCI
+start-up error in one worker (rerun clean). Paired against tuned PI-ALINEA (`B_1000_s0_{test,ood}.jsonl`, 95 % bootstrap CI):
+
+| arm | T mean | T diff vs PI-ALINEA | T TTS reduction | O mean | O diff vs PI-ALINEA | O TTS reduction |
+|---|---|---|---|---|---|---|
+| direct SUMO PPO, 700 EE (855) | −50.2 | −3.8 [−6.4, −1.2] | −10.2 % | −52.3 | +2.0 [−1.5, +5.6] | +2.7 % |
+| **direct SUMO PPO, 1000 EE (1209)** | **−44.9** | +1.6 [−0.4, +3.6] | +3.6 % | **−51.4** | +2.9 [+0.1, +5.9] | +5.4 % |
+| surrogate-PPO round 5 (962) | −41.5 | +4.9 [+3.2, +6.7] | +11.1 % | −47.6 | +6.7 [+3.5, +10.1] | +12.5 % |
+| surrogate-PPO minus direct 1000 EE | | +3.3 [+1.5, +5.3] | | | +3.8 [+1.9, +5.8] | |
+
+Reading: with 300 more SUMO episodes the direct arm improves by 5.3 on T and 0.9 on O, reaches PI-ALINEA's level on T
+(CI spans zero) and edges past it on O, but stays 3.3-3.8 veh h behind the surrogate policy with a CI clear of zero, at a
+budget 26 % larger than the surrogate arm's. Its V curve was still rising at the end (−46.9 at 28.8k of 36k steps), so a
+longer run may close more of the gap; the sample-efficiency claim (surrogate-PPO at 962 EE > direct at 1209 EE) holds.
+Table row for the 1000 EE arm (arrays re-generated, `runs/study/v3b/eval/table_b1000_{test,ood}.jsonl`): ID TTS 41.11,
+mean queue 12.11, max queue 32.92, served 1974.5; OOD TTS 47.89, mean queue 13.11, max queue 39.19, served 1992.7;
+budget 1209 episodes, 9.9 h (7.18 + 2.67 ledger).
+
+## 17. Reward queue timing unified to Q_{k+1} in `m14/` (2026-09-22, user decision)
+Paper audit before the 60 km/h-ramp rerun: paper Eq. 4 charges Q_k in both environments, but the
+code charged the SUMO *interval-average* queue and the surrogate *end-of-interval* queue. The user chose Q_{k+1}
+for both, which removes the paper's lagged terms δ^z_{k-1} + L_z b_{k-1} from Theorem 1. Q_k would have left the
+final-interval queue uncharged (closing the meter in the last 30 s would be free).
+- Code (`m14/` only; the parent `src/` keeps the old timing): `m14/src/rl/sumo_env_wrapper.py` charges
+  `queue_end`; the interval mean is still in info as `interval_queue_mean`. The surrogate, offline rescoring
+  (`rollout.py`, plant return error, gate) and the MPC cost already used the end queue: no change. Docstring in
+  `reward.py`, `m14/docs/model.md` updated; `tests/test_scenario.py::test_m14_no_cap_queue_grows` asserts
+  tts_step = (N + Q_after + P)·τ on a growing queue.
+- Tests: 72 passed, 1 failed (`test_standalone.py` detached copy: `dateutil` missing under `python -I`; fails
+  identically without the change, environment issue).
+- Size of the change, rescored on the v3b final-eval test rollouts (10 arms × 90 episodes): mean returns move
+  by −0.23 to +0.27 veh h (max 1.5 in one episode), paired differences vs PI-ALINEA by ≤ 0.3, rankings unchanged;
+  `tts_veh_h` (the reported metric) does not use the reward and is unaffected.
+- Paper edits pending (co-authors): Eq. 4 Q_k → Q_{k+1}, drop "Q_k denotes the beginning-of-interval queue",
+  Theorem 1 / Eq. 21 without the lagged terms, proof step via N+Q+P = max(N_{k+1}+Q_{k+1}, C^in − C^out).
+
+## 18. 60 km/h ramp in `m14/` (2026-09-22, user decision; rerun of the whole study pending)
+`m14/configs/scenario.yaml` `ramp_speed_limit_mps: 16.67` (was 33.33); everything else in the v3b road unchanged
+(10° entry, 200 m ramp, 100 m acceleration lane at the mainline 120 km/h, D = 1200, uncapped virtual queue).
+Edited in place (m14/ had no generated data or runs; the 120 km/h version is in git at 357d5b7). `m14/README.md`,
+`m14/docs/model.md`, `m14/tests/test_scenario.py` (ramp lane 16.67, acceleration lane 33.33) updated.
+Tests: 72 passed, 1 failed (the pre-existing `test_standalone.py` `dateutil` failure of §17).
+
+Probe vehicle from standstill on an empty road (scratchpad TraCI check, same method as §13):
+
+| net | ramp lane / merge link limit | max on ramp | at the nose | at the lane drop | entering the main lane |
+|---|---|---|---|---|---|
+| 120 km/h ramp (study as published) | 120 / 120 | 94 | 100 | 111 | 113 km/h |
+| **60 km/h ramp** | 60 / 90 (netconvert averages the two edges) | 61 | 61 | **92** | 103 km/h |
+| 30° net, 120 km/h ramp (§13, for reference) | 120 / 33 | 71 | 33 | 81 | 88 km/h |
+
+Reading: ramp vehicles now merge ≈ 28 km/h below mainline speed (was ≈ 9). The lane-drop speed sits between
+the two nets already compared (30°: 81 km/h, 10°: 111 km/h; going from 30° to 10° moved the first-breakdown rate up
+one 120 veh/h step on 5 of the 8 loaded E0 profiles, §14), so the capacity change should be at most about one
+step, but it is not measured yet.
+Next: E0 on the 60 km/h net as the capacity check before any round-0 data; if the merge capacity moves by more
+than ≈ 50 veh/h, rescale the capacity-tied constants (storage-mandatory 2500 veh/h, feedforward range 2250–2550,
+E0 feedforward capacities, demand-family ceilings) before generating round 0.

@@ -1,4 +1,4 @@
-"""M14 scenario: 200 m ramp at 120 km/h = acceleration segment only, meter at its
+"""M14 scenario: 200 m ramp at 60 km/h = acceleration segment only, meter at its
 start, discharge 1200 veh/h, no storage cap (queue priced by the TTS reward). Needs sumo."""
 
 from __future__ import annotations
@@ -38,7 +38,8 @@ def test_m14_geometry_and_stop_line(tmp_path):
     env.reset(options={"profile": profile})
     import traci
     traci.switch(env._traci_label)
-    assert abs(traci.lane.getMaxSpeed("ramp_0") - 33.33) < 0.05                      # 120 km/h ramp
+    assert abs(traci.lane.getMaxSpeed("ramp_0") - 16.67) < 0.05                      # 60 km/h ramp
+    assert abs(traci.lane.getMaxSpeed("highway_accel_0") - 33.33) < 0.05             # acceleration lane keeps the mainline limit
     ramp_len = traci.lane.getLength("ramp_0")
     assert 175.0 < ramp_len <= 200.0                                                # 10° entry: the merge junction absorbs ~20 m of the 200 m edge
     env.step(np.array([1.0], dtype=np.float32))                                     # forces the depart position to resolve
@@ -57,6 +58,10 @@ def test_m14_no_cap_queue_grows(tmp_path):
         _, _, _, _, info = env.step(np.array([0.0], dtype=np.float32))
         queues.append(info["queue_after"]); overrides.append(info["u_override"])
         assert info["u"] == 0.0 and info["queue_max_veh"] == -1.0
+        # the reward charges the end-of-interval queue Q_{k+1} (same as the surrogate), not the interval mean
+        assert info["queue_length"] == info["queue_after"]
+        expected = (info["on_road_veh"] + info["queue_after"] + info["backlog_veh"]) * 30.0 / 3600.0
+        assert abs(info["tts_step_veh_h"] - expected) < 1e-6
     env.close()
     assert not any(overrides)                             # no forced-open rule
     assert queues[-1] > 100.0                             # the queue simply accumulates (16 × 7.5 = 120)

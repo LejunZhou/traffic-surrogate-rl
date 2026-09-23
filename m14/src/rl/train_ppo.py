@@ -4,6 +4,12 @@ Use configs/ppo.yaml with configs/env_sumo.yaml or configs/env_surrogate.yaml.
 Evaluation cycles over frozen validation profiles; aggregation can warm-start
 from an existing PPO checkpoint. Outputs include policies, CSV logs, a config
 snapshot, and optional Weights & Biases metrics.
+
+`training.resume: true` continues an interrupted run in the same run directory
+from its latest checkpoint (see `prepare_resume`): optimizer state and step
+count are kept, the evaluation history and ledger are cut back to what that
+checkpoint accounts for, and the profile / SUMO-seed streams continue rather
+than replay. A resumed run is not bitwise identical to an uninterrupted one.
 """
 
 from __future__ import annotations
@@ -12,7 +18,9 @@ import argparse
 import copy
 import json
 import random
+import re
 import sys
+import time
 from pathlib import Path
 
 import gymnasium as gym
@@ -43,6 +51,81 @@ _PPO_ALLOWED_KEYS = {
     "device",
     "verbose",
 }
+
+
+def checkpoint_step(path: Path) -> int:
+    match = re.search(r"_(\d+)_steps\.zip$", Path(path).name)
+    if match is None:
+        raise ValueError(f"not a step checkpoint: {path}")
+    return int(match.group(1))
+
+
+def latest_checkpoint(run_dir: Path, env_type: str) -> Path | None:
+    ckpts = list((Path(run_dir) / "checkpoints").glob(f"ppo_{env_type}_*_steps.zip"))
+    return max(ckpts, key=checkpoint_step) if ckpts else None
+
+
+def prepare_resume(run_dir: Path, steps: int, episode_len: int, n_eval_episodes: int,
+                   ledger_path: Path | None = None, train_purpose: str = "direct_ppo") -> dict:
+    """Cut an interrupted run directory back to its checkpoint at `steps` (0 = no checkpoint).
+
+    - progress.csv / monitor.csv are kept as *_part<n>.csv (SB3 and Monitor would overwrite them);
+    - the evaluation history keeps the evaluations at timesteps <= steps (a copy of the full file
+      is kept as evaluations_part<n>.npz), so checkpoint selection still sees every kept evaluation;
+    - the ledger keeps steps // episode_len training episodes and n_eval_episodes per kept
+      evaluation; later rows (simulated, but their training was lost) move to ledger_lost.jsonl.
+    Returns the kept evaluation history and bookkeeping for the resumed session.
+    """
+    run_dir = Path(run_dir)
+    part = 1 + len(list(run_dir.glob("progress_part*.csv")))
+    for name in ("progress.csv", "monitor.csv"):
+        path = run_dir / name
+        if path.exists():
+            path.replace(run_dir / f"{path.stem}_part{part}{path.suffix}")
+    history = None
+    npz = run_dir / "eval" / "evaluations.npz"
+    if npz.exists():
+        d = np.load(npz)
+        keep = d["timesteps"] <= steps
+        history = {key: d[key][keep] for key in ("timesteps", "results", "ep_lengths")}
+        (run_dir / "eval" / f"evaluations_part{part}.npz").write_bytes(npz.read_bytes())
+    n_evals = 0 if history is None else int(len(history["timesteps"]))
+    lost = 0
+    if ledger_path is not None and Path(ledger_path).exists():
+        ledger_path = Path(ledger_path)
+        rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        quota = {train_purpose: steps // episode_len, "eval_val": n_evals * n_eval_episodes}
+        kept, dropped, seen = [], [], {}
+        for row in rows:
+            purpose = row["purpose"]
+            if purpose in quota:
+                seen[purpose] = seen.get(purpose, 0) + 1
+                (kept if seen[purpose] <= quota[purpose] else dropped).append(row)
+            else:
+                kept.append(row)
+        if dropped:
+            with (run_dir / "ledger_lost.jsonl").open("a", encoding="utf-8") as f:
+                f.writelines(json.dumps({**row, "lost_in_part": part}) + "\n" for row in dropped)
+            tmp = ledger_path.with_suffix(".jsonl.tmp")
+            tmp.write_text("".join(json.dumps(row) + "\n" for row in kept), encoding="utf-8")
+            tmp.replace(ledger_path)
+        lost = len(dropped)
+    info = {"part": part, "resumed_from_steps": int(steps), "n_train_episodes": int(steps // episode_len),
+            "n_evaluations_kept": n_evals, "ledger_rows_lost": lost, "time": time.time()}
+    with (run_dir / "resume_log.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps(info) + "\n")
+    return {**info, "history": history}
+
+
+def restore_eval_history(eval_callback, history: dict | None) -> None:
+    """Pre-load an EvalCallback with the kept evaluations so evaluations.npz and best_model.zip
+    continue the interrupted run instead of starting over."""
+    if history is None or len(history["timesteps"]) == 0:
+        return
+    eval_callback.evaluations_timesteps = [int(t) for t in history["timesteps"]]
+    eval_callback.evaluations_results = [[float(v) for v in row] for row in history["results"]]
+    eval_callback.evaluations_length = [[int(v) for v in row] for row in history["ep_lengths"]]
+    eval_callback.best_mean_reward = float(np.max(np.mean(history["results"], axis=1)))
 
 
 def train(config: dict) -> None:
@@ -101,13 +184,34 @@ def train(config: dict) -> None:
     print(f"[train_ppo] Run dir: {run_dir}")
     print(f"[train_ppo] Backend: {_backend_label(env_type)}")
 
+    ledger_study = training_cfg.get("ledger_study")
+    ledger_purpose = str(training_cfg.get("ledger_purpose", "direct_ppo"))
+    # ---- resume an interrupted run (before any env or logger reopens the run's files)
+    resume_info = None
+    resume_ckpt = None
+    if bool(training_cfg.get("resume", False)):
+        if training_cfg.get("init_policy"):
+            raise ValueError("training.resume and training.init_policy are mutually exclusive")
+        resume_ckpt = latest_checkpoint(run_dir, env_type)
+        ledger_path = None
+        if ledger_study:
+            from utils.ledger import Ledger
+
+            ledger_path = Ledger(str(ledger_study), project_root).path
+        leftovers = resume_ckpt is not None or (run_dir / "monitor.csv").exists() or (ledger_path is not None and ledger_path.exists())
+        if leftovers:
+            resume_info = prepare_resume(run_dir, checkpoint_step(resume_ckpt) if resume_ckpt else 0,
+                                         _episode_len(env_cfg, project_root), _n_eval_episodes(training_cfg, project_root),
+                                         ledger_path, ledger_purpose)
+            print(f"[train_ppo] resume (part {resume_info['part']}): from {resume_ckpt or 'scratch'} at "
+                  f"{resume_info['resumed_from_steps']} steps; {resume_info['n_evaluations_kept']} evaluations kept, "
+                  f"{resume_info['ledger_rows_lost']} ledger rows moved to ledger_lost.jsonl")
+
     env = None
     eval_env = None
     try:
         env_cfg = _resolve_auto_normalisation(env_cfg, project_root)
         vec_mode = _is_vec_surrogate(env_type, env_cfg)
-        ledger_study = training_cfg.get("ledger_study")
-        ledger_purpose = str(training_cfg.get("ledger_purpose", "direct_ppo"))
         if vec_mode:
             from stable_baselines3.common.vec_env import VecMonitor
 
@@ -115,6 +219,9 @@ def train(config: dict) -> None:
             n_envs = int(env.num_envs)
         else:
             base = _make_env(env_type, env_cfg)
+            if resume_info is not None and hasattr(base.unwrapped, "episode_index"):
+                # continue the SUMO-seed sequence (base seed + episode index) instead of replaying it
+                base.unwrapped.episode_index = int(resume_info["n_train_episodes"])
             if env_type == "sumo" and ledger_study:
                 base = LedgerEpisodes(base, ledger_study, ledger_purpose, project_root, int(training_cfg.get("ledger_round", 0)))
             env = Monitor(base, filename=str(run_dir / "monitor.csv"))
@@ -173,18 +280,19 @@ def train(config: dict) -> None:
                     )
                     print(f"[train_ppo] eval cycles through {len(eval_base.cells)} (mainline, ramp) cells with fixed seeds")
                 eval_env = Monitor(eval_base)
-            callbacks.append(
-                EvalCallback(
-                    eval_env,
-                    best_model_save_path=str(run_dir),
-                    log_path=str(run_dir / "eval"),
-                    eval_freq=max(eval_freq // n_envs, 1),
-                    n_eval_episodes=n_eval_episodes,
-                    deterministic=True,
-                    render=False,
-                    verbose=1,
-                )
+            eval_callback = EvalCallback(
+                eval_env,
+                best_model_save_path=str(run_dir),
+                log_path=str(run_dir / "eval"),
+                eval_freq=max(eval_freq // n_envs, 1),
+                n_eval_episodes=n_eval_episodes,
+                deterministic=True,
+                render=False,
+                verbose=1,
             )
+            if resume_info is not None:
+                restore_eval_history(eval_callback, resume_info["history"])
+            callbacks.append(eval_callback)
             print(f"[train_ppo] EvalCallback: deterministic eval every {eval_freq} steps ({n_eval_episodes} episodes) -> best_model.zip")
         info_callback = _make_wandb_info_callback(
             wandb_run,
@@ -203,7 +311,15 @@ def train(config: dict) -> None:
 
         ppo_kwargs = _ppo_kwargs(ppo_cfg)
         init_policy = training_cfg.get("init_policy")
-        if init_policy:
+        resumed_steps = 0
+        if resume_ckpt is not None:
+            # full state: policy, value net, optimizer, step count; a new seed stream so the resumed
+            # session does not replay the profiles drawn since step 0
+            resumed_steps = checkpoint_step(resume_ckpt)
+            load_kwargs = {k: v for k, v in ppo_kwargs.items() if k != "policy_kwargs"}
+            model = PPO.load(str(resume_ckpt), env=env, seed=seed + resumed_steps, tensorboard_log=None, **load_kwargs)
+            print(f"[train_ppo] resumed from {resume_ckpt.name}: {model.num_timesteps} of {total_timesteps} steps done")
+        elif init_policy:
             init_path = _resolve_path(init_policy, project_root)
             load_kwargs = {k: v for k, v in ppo_kwargs.items() if k != "policy_kwargs"}
             model = PPO.load(str(init_path), env=env, seed=seed, tensorboard_log=None, **load_kwargs)
@@ -233,9 +349,10 @@ def train(config: dict) -> None:
         model.set_logger(sb3_logger)
 
         model.learn(
-            total_timesteps=total_timesteps,
+            total_timesteps=max(total_timesteps - resumed_steps, 0),   # SB3 adds the restored step count back
             callback=CallbackList(callbacks) if callbacks else None,
             progress_bar=bool(training_cfg.get("progress_bar", False)),
+            reset_num_timesteps=resume_ckpt is None,
         )
         final_path = run_dir / "final_model"
         model.save(str(final_path))
@@ -343,6 +460,21 @@ class CycleProfiles(gym.Wrapper):
         opts.setdefault("sumo_seed", p.sumo_seeds[0] if p.sumo_seeds else self.base_seed + self._i % len(self.profiles))
         self._i += 1
         return self.env.reset(seed=seed, options=opts)
+
+
+def _episode_len(env_cfg: dict, project_root: Path) -> int:
+    """Control steps per episode (every M14 episode has the fixed length duration / dt_ctrl)."""
+    sim = load_config(str(_resolve_path(env_cfg.get("sumo_config", "configs/scenario.yaml"), project_root))).get("simulation", {})
+    return int(round(float(sim.get("duration_s", 3600)) / float(sim.get("dt_ctrl_s", 30))))
+
+
+def _n_eval_episodes(training_cfg: dict, project_root: Path) -> int:
+    eval_profiles = training_cfg.get("eval_profiles")
+    if eval_profiles:
+        from sumo_env.demand_profiles import load_profile_set
+
+        return len(load_profile_set(_resolve_path(eval_profiles, project_root)))
+    return int(training_cfg.get("n_eval_episodes", 1))
 
 
 def _is_vec_surrogate(env_type: str, env_cfg: dict) -> bool:

@@ -45,6 +45,9 @@ def main() -> None:
     ap.add_argument("--seeds", type=int, nargs="+", default=[0])
     ap.add_argument("--direct-ee", type=int, nargs="*", default=[200, 700])
     ap.add_argument("--alinea", required=True, help="selected alinea: or pialinea: controller specification")
+    ap.add_argument("--pure-alinea", default=None, help="best pure ALINEA of the search; with --pi-alinea, "
+                                                          "replaces the single ALINEA / PI-ALINEA arm by two arms")
+    ap.add_argument("--pi-alinea", default=None, help="best PI-ALINEA of the search")
     ap.add_argument("--constant", default=None, help="optional validation-selected constant specification, e.g. u=0.5")
     ap.add_argument("--constants", type=float, nargs="*", default=[0.0, 0.5, 1.0], help="fixed, untuned reference rates")
     ap.add_argument("--ensemble", default="runs/deeponet/round0")
@@ -76,6 +79,8 @@ def main() -> None:
             arms.append({"name": name, "kind": kind, "points": points})
 
     a0, a1 = [], []
+    # cost of the data and model training behind each ensemble, without PPO time (for Surrogate-MPC)
+    ensemble_cost = {(PROJECT_ROOT / args.ensemble).resolve(): (dataset_ee, base_runtime)}
     for seed in args.seeds:
         agg = PROJECT_ROOT / f"runs/aggregation/{args.study}_s{seed}"
         if not (agg / "rounds.json").exists():
@@ -85,6 +90,7 @@ def main() -> None:
             continue
         selected_round = max(rounds, key=lambda row: row["best_sumo_val"])["round"]
         learning_runtime = base_runtime
+        model_runtime = base_runtime
         seen_ensembles = {(PROJECT_ROOT / args.ensemble).resolve()}
         for row in rounds:
             learning_runtime += float(row["ppo_wall_s"])
@@ -93,8 +99,11 @@ def main() -> None:
                 after = PROJECT_ROOT / after
             if after.resolve() not in seen_ensembles:
                 learning_runtime += _ensemble_runtime(after)
+                model_runtime += _ensemble_runtime(after)
                 seen_ensembles.add(after.resolve())
-            runtime = learning_runtime + _runtime(_budget_rows(f"{args.study}_s{seed}", row["round"]))
+            sumo_rows = _runtime(_budget_rows(f"{args.study}_s{seed}", row["round"]))
+            runtime = learning_runtime + sumo_rows
+            ensemble_cost[after.resolve()] = (row["cumulative_ee"], model_runtime + sumo_rows)
             a1.append(point(f"A1_r{row['round']}_s{seed}", str(agg / f"selected_r{row['round']}.zip"),
                             row["cumulative_ee"], runtime, seed, round=row["round"], validation_selected=row["round"] == selected_round,
                             ensemble_dir=str(row["ensemble_before"])))
@@ -122,15 +131,27 @@ def main() -> None:
     tuning = _budget_rows(f"{args.study}_alinea")
     feedback_rows = [r for r in tuning if str(r["policy"]).startswith(("alinea:", "pialinea:"))]
     constant_rows = [r for r in tuning if str(r["policy"]).startswith("u=")]
-    add("ALINEA / PI-ALINEA", "band", [point("alinea", args.alinea, len(feedback_rows), _runtime(feedback_rows))])
+    if args.pure_alinea and args.pi_alinea:
+        # the pure arm is charged for its own candidates; PI-ALINEA for the whole joint search
+        pure_rows = [r for r in feedback_rows if str(r["policy"]).startswith("alinea:")]
+        add("ALINEA", "band", [point("alinea_pure", args.pure_alinea, len(pure_rows), _runtime(pure_rows))])
+        add("PI-ALINEA", "band", [point("pialinea", args.pi_alinea, len(feedback_rows), _runtime(feedback_rows))])
+    else:
+        add("ALINEA / PI-ALINEA", "band", [point("alinea", args.alinea, len(feedback_rows), _runtime(feedback_rows))])
     if args.constant:
         add("tuned constant u", "band", [point("constant", args.constant, len(constant_rows), _runtime(constant_rows))])
     for u in args.constants:
         label = f"u={u:g}"
         add(f"fixed {label}", "band", [point(f"constant_fixed_{u:g}", label, 0, 0.0)])
     if args.mpc_spec and not args.no_mpc:
-        add("Surrogate-MPC", "point", [point("mpc", args.mpc_spec, dataset_ee, base_runtime,
-                                             ensemble_dir=str(PROJECT_ROOT / args.ensemble))])
+        mpc_ensemble = Path(args.mpc_spec.split(":", 1)[1].split(",")[0])
+        if not mpc_ensemble.is_absolute():
+            mpc_ensemble = PROJECT_ROOT / mpc_ensemble
+        if mpc_ensemble.resolve() not in ensemble_cost:
+            raise SystemExit(f"MPC ensemble {mpc_ensemble} is neither --ensemble nor an aggregation ensemble; its cost is unknown")
+        mpc_ee, mpc_runtime = ensemble_cost[mpc_ensemble.resolve()]
+        add("Surrogate-MPC", "point", [point("mpc", args.mpc_spec, mpc_ee, mpc_runtime,
+                                             ensemble_dir=str(mpc_ensemble))])
     payload = {
         "study": args.study, "dataset_ee": dataset_ee, "arms": arms,
         "runtime_accounting_note": "accounted_runtime_s is partial accounting, not elapsed wall-clock or normalized compute. "

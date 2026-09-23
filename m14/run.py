@@ -131,6 +131,15 @@ def simulate(args) -> None:
         env.close()
 
 
+def e0(args) -> None:
+    """Scenario screening (its trajectories seed the initial dataset) and the capacity check
+    against the 120 km/h-ramp reference report."""
+    if not reused(f"{STUDY}/e0.json", args.dry_run):
+        execute(["scripts/run_scenario_characterisation.py", "--workers", args.workers,
+                 "--study", "m14_e0", "--out", f"{STUDY}/e0.json"], args.dry_run)
+    execute(["scripts/compare_e0_capacity.py", "--new", f"{STUDY}/e0.json"], args.dry_run)
+
+
 def data(args) -> None:
     if reused(f"{STORE}/split_index.json", args.dry_run):
         return
@@ -153,27 +162,32 @@ def deeponet(args) -> None:
 
 def surrogate_ppo(args) -> None:
     require(f"{ENSEMBLE}/manifest.json", args.dry_run, "Run: python run.py deeponet")
+    # M14_RECOVER_INTERRUPTED=1 (set by `pipeline --recover-interrupted`, e.g. on Colab): a round cut off by a
+    # lost session is moved aside and redone instead of stopping the study
+    recover = ["--recover-interrupted"] if os.environ.get("M14_RECOVER_INTERRUPTED") == "1" else []
     execute(["scripts/run_aggregation_loop.py", "--study", f"m14_s{args.seed}", "--seed", args.seed,
              "--rounds", args.rounds, "--steps-per-round", args.steps, "--workers", args.workers,
-             "--stop-delta", "2", "--stop-patience", "2", "--resume"], args.dry_run)
+             "--stop-delta", "2", "--stop-patience", "2", "--resume", *recover], args.dry_run)
 
 
 def sumo_ppo(args) -> None:
     require(f"{STORE}/metadata.json", args.dry_run, "Run: python run.py data")
     for budget in args.budgets:
         run = f"{STUDY}/direct_ppo_{budget}ee_s{args.seed}"
-        frequency = 4800 if budget <= 200 else (9600 if budget <= 700 else 24000)
+        # validation every 40 episodes up to 200, every 80 above (the published 700/1000 runs used 9600 steps)
+        frequency = 4800 if budget <= 200 else 9600
         frequency = min(frequency, budget * 120)
         if not reused(f"{run}/final_model.zip", args.dry_run):
             if not args.dry_run and (ROOT / run).exists() and any((ROOT / run).iterdir()):
-                raise RuntimeError(f"Incomplete direct PPO output at {run}. Use a fresh output directory via "
-                                   "the low-level trainer or a fresh project copy; automatic restart would mix checkpoints and ledger entries.")
+                print(f"Resuming the interrupted direct PPO run at {run} from its latest checkpoint "
+                      "(ledger and evaluation history are cut back to that checkpoint).", flush=True)
             if budget % 4:
                 print("The requested budget is nominal: PPO collects full 480-step rollouts. "
                       "The ledger records the actual episode count.", flush=True)
             execute(["-m", "rl.train_ppo", "--config", "configs/ppo.yaml", "--overlay", "configs/env_sumo.yaml",
                      "--seed", args.seed, "--total-timesteps", budget * 120,
                      "--set", f"training.eval_freq={frequency}", "--set", f"output.run_dir={run}",
+                     "--set", "training.resume=true",
                      "--set", f"training.ledger_study=m14_direct_{budget}_s{args.seed}",
                      "--set", f"env.network_dir=data/networks/direct_{budget}_s{args.seed}"], args.dry_run)
         execute(["scripts/select_checkpoint_profiles.py", "--run", run], args.dry_run)
@@ -182,19 +196,55 @@ def sumo_ppo(args) -> None:
 def baselines(args) -> None:
     require(f"{STORE}/metadata.json", args.dry_run, "Run: python run.py data")
     if not reused(f"{STUDY}/alinea_tuning.json", args.dry_run):
+        grid = []
+        for flag in ("dets", "rhos", "kis", "kps"):
+            values = getattr(args, flag, None)
+            if values:
+                grid += [f"--{flag}", *values]
         execute(["scripts/tune_alinea_profiles.py", "--workers", args.workers, "--study", "m14_alinea",
-                 "--out", f"{STUDY}/alinea_tuning.json"], args.dry_run)
+                 "--out", f"{STUDY}/alinea_tuning.json", *grid], args.dry_run)
 
 
 def evaluate(args) -> None:
     require(f"{STUDY}/alinea_tuning.json", args.dry_run, "Run: python run.py baselines")
     tuning = json.loads((ROOT / f"{STUDY}/alinea_tuning.json").read_text()) if not args.dry_run else {
-        "best_alinea": "<selected from alinea_tuning.json>", "best_constant": "<selected from alinea_tuning.json>"}
+        "best_alinea": "<selected from alinea_tuning.json>", "best_constant": "<selected from alinea_tuning.json>",
+        "best_pure_alinea": "<selected>", "best_pi_alinea": "<selected>"}
+    extra = []
+    if tuning.get("best_pure_alinea") and tuning.get("best_pi_alinea"):
+        extra += ["--pure-alinea", tuning["best_pure_alinea"], "--pi-alinea", tuning["best_pi_alinea"]]
+    if args.mpc:
+        ensemble = final_ensemble(args.seeds[0], args.dry_run)
+        extra += ["--mpc-spec", f"mpc:{ensemble},{args.mpc_args}" if args.mpc_args else f"mpc:{ensemble}"]
     execute(["scripts/build_arms_manifest.py", "--study", "m14", "--seeds", *args.seeds,
              "--direct-ee", *args.budgets, "--alinea", tuning["best_alinea"],
-             "--constant", tuning["best_constant"], "--out", f"{STUDY}/arms.json"], args.dry_run)
+             "--constant", tuning["best_constant"], "--out", f"{STUDY}/arms.json", *extra], args.dry_run)
     execute(["scripts/run_final_evaluation.py", "--arms", f"{STUDY}/arms.json", "--workers", args.workers,
              "--study", "m14_final", "--sets", *args.sets], args.dry_run)
+
+
+def final_ensemble(seed: int, dry: bool) -> str:
+    """The last aggregation round's fine-tuned ensemble (Surrogate-MPC and Table I use it)."""
+    rounds_path = ROOT / f"runs/aggregation/m14_s{seed}/rounds.json"
+    if dry:
+        return f"<last ensemble_after in {rounds_path.relative_to(ROOT)}>"
+    if not rounds_path.exists():
+        raise RuntimeError(f"Missing {rounds_path.relative_to(ROOT)}. Run: python run.py surrogate-ppo")
+    ensemble = Path(json.loads(rounds_path.read_text())[-1]["ensemble_after"])
+    return str(ensemble.relative_to(ROOT) if ensemble.is_relative_to(ROOT) else ensemble)
+
+
+def tables(args) -> None:
+    """Table I (final ensemble on the study store's val/test splits), Table II and the headline reductions."""
+    seed = args.seeds[0]
+    ensemble = final_ensemble(seed, args.dry_run)
+    store = f"runs/aggregation/m14_s{seed}/store"
+    for split in ("val", "test"):
+        if args.dry_run or not (ROOT / ensemble / f"eval_{split}_rows.jsonl").exists():
+            execute(["scripts/eval_surrogate_regimes.py", "--ensemble", ensemble, "--store", store, "--split", split],
+                    args.dry_run)
+    execute(["scripts/build_paper_tables.py", "--arms", f"{STUDY}/arms.json", "--seed", seed,
+             "--ensemble", ensemble, "--sets", *args.sets, "--out", f"{STUDY}/tables"], args.dry_run)
 
 
 def report(args) -> None:
@@ -204,9 +254,72 @@ def report(args) -> None:
              "--rounds", *rounds, "--out", "reports/figures"], args.dry_run)
 
 
+def _stage_argv(stage: str, args) -> list[str]:
+    argv = ["--workers", str(args.workers)]
+    if stage == "deeponet":
+        argv += ["--members", str(args.members)]
+    if stage in ("surrogate-ppo", "sumo-ppo"):
+        argv += ["--seed", str(args.seed)]
+    if stage == "surrogate-ppo":
+        argv += ["--rounds", str(args.rounds), "--steps", str(args.steps)]
+    if stage == "sumo-ppo":
+        argv += ["--budgets", *map(str, args.budgets)]
+    if stage == "baselines":
+        for flag in ("dets", "rhos", "kis", "kps"):
+            if getattr(args, flag, None):
+                argv += [f"--{flag}", *map(str, getattr(args, flag))]
+    return argv
+
+
+def _run_branches(branches: dict[str, list[str]], args) -> None:
+    """Run each branch's stages in order, the branches concurrently, as child run.py processes
+    logging to runs/logs/pipeline_<branch>.log. Every stage reuses or resumes its outputs."""
+    import threading
+
+    (ROOT / "runs/logs").mkdir(parents=True, exist_ok=True)
+    failures: dict[str, str] = {}
+
+    def run_branch(name: str, stages: list[str]) -> None:
+        log_path = ROOT / f"runs/logs/pipeline_{name}.log"
+        with log_path.open("a", encoding="utf-8") as log:
+            for stage in stages:
+                cmd = [sys.executable, str(ROOT / "run.py"), stage, *_stage_argv(stage, args)]
+                log.write(f"\n[{datetime.now(timezone.utc).isoformat()}] $ {shlex.join(cmd)}\n"); log.flush()
+                code = subprocess.run(cmd, cwd=ROOT, env=runtime_env(), stdout=log, stderr=subprocess.STDOUT).returncode
+                if code != 0:
+                    failures[name] = f"{stage} exited {code}; see {log_path.relative_to(ROOT)}"
+                    return
+        print(f"[pipeline] branch {name} finished", flush=True)
+
+    threads = [threading.Thread(target=run_branch, args=item) for item in branches.items()]
+    for name, stages in branches.items():
+        print(f"[pipeline] branch {name}: {' -> '.join(stages)} (log runs/logs/pipeline_{name}.log)", flush=True)
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if failures:
+        raise RuntimeError("parallel branches failed: " + "; ".join(f"{k}: {v}" for k, v in failures.items()))
+
+
 def pipeline(args) -> None:
     args.seeds = [args.seed]
-    for stage in (data, deeponet, surrogate_ppo, sumo_ppo, baselines, evaluate, report):
+    if args.recover_interrupted:
+        os.environ["M14_RECOVER_INTERRUPTED"] = "1"      # inherited by every stage and child process
+    e0(args)
+    if not args.dry_run and not args.ignore_capacity_check:
+        check = json.loads((ROOT / f"{STUDY}/e0_capacity_comparison.json").read_text())
+        if check["rescale_recommended"] and not (ROOT / f"{STORE}/split_index.json").exists():
+            raise RuntimeError(f"capacity check: {check['verdict']} (mean shift {check['mean_shift_vph']:+.0f} veh/h). "
+                               "Rescale the constants, or rerun with --ignore-capacity-check to proceed anyway.")
+    data(args)
+    branches = {"surrogate": ["deeponet", "surrogate-ppo"], "direct": ["sumo-ppo"], "baselines": ["baselines"]}
+    if args.parallel and not args.dry_run:
+        _run_branches(branches, args)
+    else:
+        for stage in (deeponet, surrogate_ppo, sumo_ppo, baselines):
+            stage(args)
+    for stage in (evaluate, tables, report):
         stage(args)
 
 
@@ -250,15 +363,45 @@ def smoke(args) -> None:
     run("scripts/eval_surrogate_regimes.py", "--ensemble", ENSEMBLE, "--store", STORE, "--split", "test")
     run("scripts/run_aggregation_loop.py", "--study", "m14_s0", "--rounds", 1, "--steps-per-round", 240,
         "--top-k", 1, "--workers", args.workers, "--finetune-epochs", 1, "--set", "training.eval_freq=120")
-    run("-m", "rl.train_ppo", "--config", "configs/ppo.yaml", "--overlay", "configs/env_sumo.yaml",
-        "--total-timesteps", 240, "--set", f"output.run_dir={STUDY}/direct_ppo_2ee_s0",
-        "--set", "training.ledger_study=m14_direct_2_s0")
+    direct = [
+        "-m", "rl.train_ppo", "--config", "configs/ppo.yaml", "--overlay", "configs/env_sumo.yaml",
+        "--set", f"output.run_dir={STUDY}/direct_ppo_2ee_s0", "--set", "training.ledger_study=m14_direct_2_s0",
+        "--set", "training.resume=true"]
+    run(*direct, "--total-timesteps", 240)
+    # simulate an interrupted session: the run lost its final model and continues to 480 steps from its checkpoint
+    (scratch / STUDY / "direct_ppo_2ee_s0/final_model.zip").unlink()
+    run(*direct, "--total-timesteps", 480)
+    _check_resumed_direct_run(scratch / STUDY / "direct_ppo_2ee_s0", scratch / "runs/ledger/m14_direct_2_s0.jsonl")
     run("scripts/select_checkpoint_profiles.py", "--run", f"{STUDY}/direct_ppo_2ee_s0")
     run("scripts/tune_alinea_profiles.py", "--workers", args.workers, "--study", "m14_alinea", "--stage1-profiles", 0,
         "--dets", 13, "--rhos", 26, "--kis", 20, "--top", 1, "--out", f"{STUDY}/alinea_tuning.json")
-    run("run.py", "evaluate", "--workers", args.workers, "--budgets", 2)
+    run("run.py", "evaluate", "--workers", args.workers, "--budgets", 2, "--mpc-args", "H=4,iters=2")
+    run("run.py", "tables")
     run("run.py", "report")
     print(f"\nSmoke workflow passed. Artifacts: {scratch}\nThese short runs are integration checks, not scientific results.")
+
+
+def _check_resumed_direct_run(run: Path, ledger: Path) -> None:
+    """Smoke assertions: 4 checkpoints and 4 evaluations at 120-step spacing, ledger = 4 training
+    + 4 validation episodes (the smoke validation set has one profile)."""
+    import numpy as np
+
+    steps = sorted(int(p.stem.split("_")[-2]) for p in (run / "checkpoints").glob("*_steps.zip"))
+    evals = np.load(run / "eval/evaluations.npz")["timesteps"].tolist()
+    rows = [json.loads(line) for line in ledger.read_text().splitlines() if line.strip()]
+    purposes = {p: sum(r["purpose"] == p for r in rows) for p in ("direct_ppo", "eval_val")}
+    problems = []
+    if steps != [120, 240, 360, 480]:
+        problems.append(f"checkpoints {steps}")
+    if evals != [120, 240, 360, 480]:
+        problems.append(f"evaluations {evals}")
+    if purposes != {"direct_ppo": 4, "eval_val": 4}:
+        problems.append(f"ledger {purposes}")
+    if not (run / "final_model.zip").exists() or not (run / "resume_log.jsonl").exists():
+        problems.append("final_model.zip or resume_log.jsonl missing")
+    if problems:
+        raise RuntimeError("resumed direct PPO run is inconsistent: " + "; ".join(problems))
+    print(f"Resume check passed: checkpoints {steps}, evaluations {evals}, ledger {purposes}", flush=True)
 
 
 def positive_int(value: str) -> int:
@@ -281,12 +424,14 @@ def parser() -> argparse.ArgumentParser:
     sim.add_argument("--index", type=int, default=0)
     sim.add_argument("--seed", type=int, default=100)
     sim.add_argument("--out", default="runs/simulation/rollout.npz")
-    descriptions = {"data": "collect E0 and mixture trajectories, then split the dataset",
+    descriptions = {"e0": "scenario screening and the capacity check against the 120 km/h-ramp reference",
+                    "data": "collect E0 and mixture trajectories, then split the dataset",
                     "deeponet": "train the GRU ensemble and evaluate held-out trajectories",
                     "surrogate-ppo": "train PPO with SUMO validation and data aggregation",
                     "sumo-ppo": "train and select the direct SUMO-PPO baselines",
                     "baselines": "tune ALINEA/PI-ALINEA and constant metering on validation",
                     "evaluate": "evaluate available controllers on frozen ID/OOD profiles",
+                    "tables": "build the paper's Table I, Table II and headline TTS reductions",
                     "report": "plot held-out returns against simulation cost",
                     "pipeline": "run the complete M14 study (hours of computation)",
                     "smoke": "test the end-to-end workflow in a separate temporary project"}
@@ -300,11 +445,28 @@ def parser() -> argparse.ArgumentParser:
             p.add_argument("--rounds", type=positive_int, default=5)
             p.add_argument("--steps", type=positive_int, default=300000, help="surrogate PPO steps per round")
         if name in ("sumo-ppo", "evaluate", "pipeline"):
-            p.add_argument("--budgets", type=positive_int, nargs="+", default=[200, 700], help="direct PPO training budgets in episodes")
-        if name in ("evaluate", "pipeline"):
-            if name == "evaluate":
+            p.add_argument("--budgets", type=positive_int, nargs="+", default=[1000], help="direct PPO training budgets in episodes")
+        if name in ("evaluate", "tables", "pipeline"):
+            if name in ("evaluate", "tables"):
                 p.add_argument("--seeds", type=int, nargs="+", default=[0], help="trained policy seeds to include")
             p.add_argument("--sets", choices=["test", "ood", "val"], nargs="+", default=["test", "ood"])
+        if name in ("evaluate", "pipeline"):
+            p.add_argument("--mpc", action=argparse.BooleanOptionalAction, default=True,
+                           help="evaluate Surrogate-MPC on the last aggregation ensemble (default: on)")
+            p.add_argument("--mpc-args", default="iters=30", help="MPC options appended to the spec, e.g. H=20,iters=30")
+        if name in ("baselines", "pipeline"):
+            p.add_argument("--dets", type=int, nargs="+", default=None, help="ALINEA detector stations (default: tuner's)")
+            p.add_argument("--rhos", type=float, nargs="+", default=None, help="ALINEA target densities, veh/km")
+            p.add_argument("--kis", type=float, nargs="+", default=None, help="ALINEA integral gains")
+            p.add_argument("--kps", type=float, nargs="+", default=None, help="PI-ALINEA proportional gains")
+        if name == "pipeline":
+            p.add_argument("--parallel", action="store_true",
+                           help="after the data stage run [deeponet -> surrogate-ppo], sumo-ppo and baselines concurrently")
+            p.add_argument("--ignore-capacity-check", action="store_true",
+                           help="generate data even if the E0 capacity check recommends rescaling")
+            p.add_argument("--recover-interrupted", action="store_true",
+                           help="rerun work cut off by a lost session (interrupted aggregation rounds and evaluation "
+                                "requests are moved aside, never deleted); use when no other study process is running")
     return ap
 
 
@@ -313,8 +475,8 @@ def main() -> None:
     os.chdir(ROOT)
     os.environ.pop("SCENARIO_OVERLAY", None)
     os.environ.update(runtime_env())
-    commands = {"simulate": simulate, "data": data, "deeponet": deeponet, "surrogate-ppo": surrogate_ppo,
-                "sumo-ppo": sumo_ppo, "baselines": baselines, "evaluate": evaluate, "report": report,
+    commands = {"simulate": simulate, "e0": e0, "data": data, "deeponet": deeponet, "surrogate-ppo": surrogate_ppo,
+                "sumo-ppo": sumo_ppo, "baselines": baselines, "evaluate": evaluate, "tables": tables, "report": report,
                 "pipeline": pipeline, "smoke": smoke}
     try:
         if args.command == "check":

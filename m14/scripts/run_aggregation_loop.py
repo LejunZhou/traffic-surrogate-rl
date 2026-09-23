@@ -72,8 +72,40 @@ def rank_checkpoints(run_dir: Path, top_k: int) -> list[dict]:
     return cands[:top_k], cands
 
 
-def completed_rounds_for_resume(study_dir: Path, study: str, resume: bool) -> list[dict]:
-    """Read-only guard: resume only at a completed round boundary."""
+def recover_interrupted_round(study_dir: Path, study: str, completed: int) -> Path:
+    """Move an interrupted round's artifacts aside (nothing is deleted) so the loop can restart that round:
+    round directories/files, the round's store entries and its ledger rows go to
+    <study_dir>/interrupted_r<j>_<time>/. The moved SUMO episodes are not charged to the study, so the
+    reported cost is that of an uninterrupted run; ledger_lost.jsonl keeps them for inspection."""
+    aside = study_dir / f"interrupted_r{completed + 1}_{int(time.time())}"
+    aside.mkdir()
+    for path in list(study_dir.iterdir()):
+        match = re.match(r"(?:ppo|rollouts|ensemble|agg|selected)_r(\d+)(?:[._]|$)", path.name)
+        if match and int(match.group(1)) > completed:
+            shutil.move(str(path), str(aside / path.name))
+    if (study_dir / "store/index.json").exists():
+        store = RolloutStore(study_dir / "store")
+        late = [e for e in store.entries if int(e.get("round", 0)) > completed]
+        if late:
+            (aside / "store_entries.json").write_text(json.dumps(late, indent=1))
+            store.entries = [e for e in store.entries if int(e.get("round", 0)) <= completed]
+            store.save_index()
+            store.write_split_index()
+    ledger_path = PROJECT_ROOT / "runs/ledger" / f"{study}.jsonl"
+    if ledger_path.exists():
+        rows = [json.loads(line) for line in ledger_path.read_text().splitlines() if line.strip()]
+        late = [r for r in rows if int(r.get("round", 0)) > completed]
+        if late:
+            (aside / "ledger_lost.jsonl").write_text("".join(json.dumps(r) + "\n" for r in late))
+            tmp = ledger_path.with_suffix(".jsonl.tmp")
+            tmp.write_text("".join(json.dumps(r) + "\n" for r in rows if int(r.get("round", 0)) <= completed))
+            tmp.replace(ledger_path)
+    print(f"[aggregation] recovered interrupted round {completed + 1}: artifacts moved to {aside}", flush=True)
+    return aside
+
+
+def completed_rounds_for_resume(study_dir: Path, study: str, resume: bool, recover: bool = False) -> list[dict]:
+    """Guard: resume only at a completed round boundary (with `recover`, an interrupted round is moved aside)."""
     rounds_path = study_dir / "rounds.json"
     rows = json.loads(rounds_path.read_text()) if rounds_path.exists() else []
     guidance = ("No files were deleted. Keep this output for inspection and restart with a new --study name "
@@ -108,8 +140,12 @@ def completed_rounds_for_resume(study_dir: Path, study: str, resume: bool) -> li
         if any(int(row.get("round", 0)) > completed for row in ledger_rows):
             artifacts.append("study ledger has unrecorded aggregation episodes")
     if artifacts:
+        if recover and resume:
+            recover_interrupted_round(study_dir, study, completed)
+            return rows
         raise RuntimeError(f"Incomplete round {completed + 1} artifacts under {study_dir}: "
-                           + ", ".join(artifacts) + ". " + guidance)
+                           + ", ".join(artifacts) + ". " + guidance
+                           + " Or pass --recover-interrupted to move the incomplete round aside and redo it.")
     return rows
 
 
@@ -136,11 +172,13 @@ def main() -> None:
     ap.add_argument("--skip-finetune", action="store_true", help="ablation: aggregation rollouts without model updates")
     ap.add_argument("--resume", action="store_true",
                     help="continue after complete recorded rounds; incomplete round artifacts cause an error and are preserved")
+    ap.add_argument("--recover-interrupted", action="store_true",
+                    help="with --resume: move an interrupted round's artifacts aside and redo the round (Colab sessions)")
     args = ap.parse_args()
 
     study_dir = PROJECT_ROOT / (args.out_dir or f"runs/aggregation/{args.study}")
     study_dir.mkdir(parents=True, exist_ok=True)
-    completed = completed_rounds_for_resume(study_dir, args.study, args.resume)
+    completed = completed_rounds_for_resume(study_dir, args.study, args.resume, args.recover_interrupted)
     if args.rounds < 1 or args.steps_per_round < 1 or args.top_k < 1 or args.stop_patience < 1:
         raise ValueError("rounds, steps-per-round, top-k and stop-patience must be positive")
     ledger = Ledger(args.study, PROJECT_ROOT)

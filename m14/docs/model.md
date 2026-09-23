@@ -3,8 +3,10 @@
 ## Traffic and control
 
 `configs/scenario.yaml` defines M14's v3b road. The mainline has one through
-lane, is 2,000 m long, and has a speed limit of 33.33 m/s. A 200 m ramp joins
-at 10° at x=1,300 m and continues along a 100 m auxiliary acceleration lane.
+lane, is 2,000 m long, and has a speed limit of 33.33 m/s (120 km/h). A 200 m
+ramp with a 16.67 m/s (60 km/h) limit joins at 10° at x=1,300 m and continues
+along a 100 m auxiliary acceleration lane, which carries the mainline limit.
+The original M14 study used 120 km/h on the ramp as well.
 The meter controls insertion at the ramp entrance; released vehicles start
 from rest. Vehicles waiting before insertion are represented by a virtual queue.
 
@@ -128,11 +130,16 @@ the control interval. Offered demand and downstream exits maintain the backlog
 accounting. Reward scale is 1; the first 90 seconds have zero reward, discount
 is 0.99, and there is no terminal queue penalty.
 
-The extraction preserves the original M14 timing choices:
+Queue timing (changed 2026-09-22 from the original M14 study, where the SUMO
+reward charged the interval-average queue):
 
-- SUMO reward charges interval-average ramp queue.
-- Surrogate reward charges the updated/end queue.
+- Both rewards charge the end-of-interval queue Q_{k+1}, so the step reward is
+  -(N_{k+1} + Q_{k+1} + P_{k+1}) τ and SUMO and the surrogate use the same
+  definition.
 - Both conservation backlog estimates use the end queue.
+- Offline rescoring (plant return error, gate) and the MPC cost use the end queue.
+  On the original study's test rollouts, re-scoring with the end queue moves
+  mean returns by at most 0.3 veh h, and no ranking changes.
 - `tts_veh_h` is a full-episode metric using density, end queue, and recorded
   pending-mainline counts. It is not simply negative training return.
 

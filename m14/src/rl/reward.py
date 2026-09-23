@@ -5,9 +5,11 @@ mainline occupancy, Q is ramp queue, and P is unmet mainline demand estimated
 by conservation. The optional terminal term and three-term throughput/queue/
 spatial-uniformity form remain configurable for diagnostic rescoring.
 
-The same numeric inputs give the same reward in both environments. SUMO
-supplies an interval-average queue while the surrogate supplies its updated
-analytic queue; that timing difference is preserved from the M14 experiment.
+The same numeric inputs give the same reward in both environments. Both
+charge the end-of-interval queue Q_{k+1} (SUMO: the virtual queue after the
+interval; surrogate: the updated analytic queue), the same queue the backlog
+estimate and offline rescoring use. The original M14 study charged the SUMO
+interval-average queue instead.
 """
 
 from __future__ import annotations

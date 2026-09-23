@@ -28,8 +28,8 @@ m14/
 └── reports/               Generated comparison figures
 ```
 
-**Physical setting:** 2 km road; merge nose at 1.3 km; a 200 m ramp at 10° plus
-a 100 m acceleration lane; 1,200 veh/h meter; uncapped virtual ramp queue.
+**Physical setting:** 2 km road at 120 km/h; merge nose at 1.3 km; a 200 m ramp at
+60 km/h, joining at 10°, plus a 100 m acceleration lane; 1,200 veh/h meter; uncapped virtual ramp queue.
 Episodes last one hour with 120 control intervals and 19 density detectors.
 
 **Learned model:** demand/released-flow histories → two-layer GRU → 256 features,
@@ -60,18 +60,23 @@ The simulation command saves a complete trajectory and metrics in
 ## Run the study
 
 ```bash
-python run.py data                   # 404 screening + 288 mixture trajectories
+python run.py e0                     # 404 screening trajectories + capacity check vs the 120 km/h ramp
+python run.py data                   # + 288 mixture trajectories
 python run.py deeponet               # 5 models, 300 epochs; held-out model checks
 python run.py surrogate-ppo          # up to 5 rounds of PPO + SUMO + fine-tuning
-python run.py sumo-ppo               # direct PPO at 200/700 training episodes
+python run.py sumo-ppo               # direct PPO at 1000 training episodes (resumable)
 python run.py baselines              # tune ALINEA/PI-ALINEA and constant rates
-python run.py evaluate               # frozen ID/OOD profiles, evaluated in SUMO
+python run.py evaluate               # frozen ID/OOD profiles in SUMO, incl. Surrogate-MPC
+python run.py tables                 # paper Tables I and II, headline TTS reductions
 python run.py report                 # comparison figures
 ```
 
-Or run `python run.py pipeline --workers 8`. This launches the full study and
-can take hours. Inspect its commands first with `python run.py pipeline --dry-run`.
-Completed stage outputs are reused; aggregation resumes recorded rounds.
+Or run `python run.py pipeline --parallel --workers 8`. This launches the full study and
+can take hours; `--parallel` runs [deeponet → surrogate-ppo], sumo-ppo and baselines
+concurrently after the data stage. Inspect its commands first with `python run.py pipeline --dry-run`.
+Completed stage outputs are reused; aggregation resumes recorded rounds and the
+direct PPO run continues from its latest checkpoint. On Google Colab use
+`../colab/m14_ramp60.ipynb` (it adds `--recover-interrupted`, see the workflow notes).
 Use a fresh copy for experiments with changed configurations so outputs do not
 mix settings. [Workflow details](docs/workflow.md) cover custom commands and outputs.
 
