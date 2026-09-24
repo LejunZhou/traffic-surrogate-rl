@@ -1,6 +1,7 @@
 # M14 · DeepONet + PPO for ramp metering
 
-A self-contained implementation of the **M14 v3b study**: one metered ramp,
+A self-contained implementation of the **M14 v3b study**, now configured for the
+**60 km/h-ramp rerun** (the current paper setting; the original study used 120 km/h): one metered ramp,
 one mainline through lane, a causal GRU DeepONet ensemble, and PPO trained
 with iterative SUMO validation and data aggregation.
 

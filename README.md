@@ -15,6 +15,14 @@ Phase 1 (M1–M7) built these pieces at constant demand. The current phase (M8�
 section) re-uses them for time-varying demand with a plant-model surrogate, an ensemble
 environment, a data-aggregation loop and a SUMO-episode ledger.
 
+> **Current experiment setting: [`m14/`](m14/README.md).** The paper study (ACC 2027) now runs from the
+> self-contained `m14/` folder: the M14 road with a **60 km/h ramp**, the Q_{k+1} queue reward, direct
+> SUMO-PPO at 1000 episodes, Surrogate-MPC, and Tables I/II (`python run.py pipeline`, then
+> `python run.py seeds --new-seeds 1 2` for policy seeds 1–2; Colab: `colab/m14_ramp60.ipynb`,
+> `colab/m14_seeds.ipynb`; status: `_progress/m14_ramp60_colab_progress.md`). The repository-root
+> pipeline below (`src/`, `configs/`, `scripts/run_v3b_study.sh`) is the earlier milestone code: its
+> "v3b" study is the original 120 km/h-ramp run, and M15 (three-lane v4) is on hold.
+
 ## Setup
 
 **Option A — self-contained venv (macOS / Linux, no system SUMO needed).** The
@@ -75,7 +83,7 @@ sh scripts/run_study.sh          # E2 parity, aggregation loop, ALINEA tuning, d
 STUDY=paper STEPS_PER_ROUND=1000000 ROUNDS=4 DIRECT_EE="200 700 2000" SEEDS="0 1 2" sh scripts/run_study.sh
 # scenario v3 (M14): 60 km/h ramp, stop line 100 m before the merge, 28-vehicle ramp storage enforced in both envs;
 # add `--overlay configs/rl/env_v3.yaml` to any train_ppo call, or use configs/experiments/round0_v3.yaml for the data stages
-# scenario v3b (M14, current): simulated ramp = 200 m acceleration segment at 120 km/h joining at 10 deg, meter at its start (D = 1200 veh/h),
+# scenario v3b (M14, original 120 km/h study; the current 60 km/h rerun lives in m14/): simulated ramp = 200 m acceleration segment at 120 km/h joining at 10 deg, meter at its start (D = 1200 veh/h),
 # uncapped virtual queue priced by the TTS reward, merge-station density from the through lane only;
 # demand family v2 (configs/profiles/family_v2.yaml, frozen sets configs/profiles/v2/: all peaks/surges over by minute 45, surge <= 800 veh/h);
 # overlay configs/rl/env_v3b.yaml, data config configs/experiments/round0_v3b.yaml; layout figure _progress/figures/m14_v3b_road_layout.png

@@ -281,6 +281,9 @@ Reading:
 - Notebook `colab/m14_seeds.ipynb` works in the same Drive folder as seed 0, pins the code commit, keeps a copy of the
   seed-0-only tables, and has the watchdog.
 - Tests: CLI dry run of `seeds`, per-branch seed propagation, seed summary maths; m14 suite 88 passed.
+- Launched on Colab 2026-09-24 06:57 UTC (commit c3d07c0; 6 SUMO workers per branch, 4 torch threads). Seed 1
+  round 1 surrogate PPO took 458 s (seed 0: 1946 s, ≈ 4.2× faster on Colab). Direct PPO runs at 7–9 steps/s
+  (≈ 4–5 h for 120k steps), the long pole as expected.
 
 ## Open
 - Explanation of the Surrogate-MPC negative result; seeds 1–2; paper edits (60 km/h numbers, Eq. 4 Q_{k+1},
