@@ -281,3 +281,54 @@ def test_sumo_and_surrogate_env_parity(tiny_ensemble, tmp_path):
                 assert r_s == 0.0 and r_v[0] == 0.0    # warm-up mask
     finally:
         sumo.close()
+
+
+def test_cached_step_matches_full_history_step():
+    """The incremental GRU gives predict_step's outputs, also after a member switch and a row reset."""
+    torch.manual_seed(5)
+    cfg = {"branch": {"type": "gru", "hidden": 16, "layers": 2, "latent_dim": 32}, "trunk": {"hidden_dim": 32, "layers": 2, "latent_dim": 32}}
+    members = [build_plant_model(cfg).eval() for _ in range(3)]
+    ens = DeepONetEnsemble(members, PlantNormalisation(20.0, 15.0), {"model": cfg}, X_GRID, 2000.0, 3600.0, 30.0)
+    rng = np.random.default_rng(0)
+    n = 5
+    hist = np.zeros((n, 2, K), np.float32); hist[:, 0] = rng.random((n, K))
+    member = rng.integers(0, 3, n)
+    cache = ens.new_branch_cache(n)
+    for k in range(K):
+        if k == 40:
+            member[1] = (member[1] + 1) % 3                     # member switch mid-history: rebuilt from the prefix
+        if k == 70:                                             # row 2 starts a new history at step 0
+            hist[2] = 0.0; hist[2, 0] = rng.random(K); cache.reset_rows(2)
+        hist[:, 1, k] = rng.random(n)
+        kv = np.full(n, k); kv[2] = k - 70 if k >= 70 else k
+        r_full, q_full = ens.predict_step(hist, kv, member)
+        r_inc, q_inc = ens.predict_step_cached(hist, kv, member, cache)
+        np.testing.assert_allclose(r_inc, r_full, rtol=1e-5, atol=1e-4)
+        np.testing.assert_allclose(q_inc, q_full, rtol=1e-5, atol=1e-2)
+    r_all, q_all = ens.predict_all_members_step(hist, kv)
+    r_all_inc, q_all_inc = ens.predict_all_members_step_cached(hist, kv, ens.new_branch_cache(n))
+    np.testing.assert_allclose(r_all_inc, r_all, rtol=1e-5, atol=1e-4)
+    np.testing.assert_allclose(q_all_inc, q_all, rtol=1e-5, atol=1e-2)
+
+
+@pytest.mark.parametrize("mode", ["sample", "mean", "pessimistic"])
+def test_vec_env_incremental_branch_matches_full_recompute(tiny_ensemble, mode):
+    """Environment trajectories with the GRU cache equal those that rerun the branch over the history."""
+    from rl.surrogate_vec_env import SurrogateVecEnv
+
+    out, _ = tiny_ensemble
+    cfg = {"project_root": str(ROOT), "ensemble_dir": str(out), "n_envs": 3, "ensemble_mode": mode, "seed": 2,
+           "profiles": {"family": "configs/demand.yaml"}, "sumo_config": "configs/scenario.yaml",
+           "reward": {"delta": 3.5, "beta": 1.0, "gamma": 0.06, "q_ref": 2476, "q_ref_mode": "offered", "queue_norm": 400, "sigma_ref": 6, "warmup_s": 90},
+           "symmetric_action": True, "observation": {"lookahead_steps": 0}}
+    fast, slow = SurrogateVecEnv(cfg), SurrogateVecEnv({**cfg, "incremental_branch": False})
+    assert fast._branch_cache is not None and slow._branch_cache is None
+    np.testing.assert_allclose(fast.reset(), slow.reset(), rtol=1e-5, atol=1e-5)
+    rng = np.random.default_rng(3)
+    for _ in range(K + 30):                                     # crosses an episode boundary (slot resets)
+        a = rng.uniform(-1, 1, (3, 1)).astype(np.float32)
+        of, rf, df, _ = fast.step(a)
+        os_, rs, ds, _ = slow.step(a)
+        np.testing.assert_allclose(of, os_, rtol=1e-4, atol=1e-4)
+        np.testing.assert_allclose(rf, rs, rtol=1e-4, atol=1e-4)
+        assert (df == ds).all()

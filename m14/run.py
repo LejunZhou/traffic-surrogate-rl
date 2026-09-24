@@ -235,16 +235,22 @@ def final_ensemble(seed: int, dry: bool) -> str:
 
 
 def tables(args) -> None:
-    """Table I (final ensemble on the study store's val/test splits), Table II and the headline reductions."""
-    seed = args.seeds[0]
-    ensemble = final_ensemble(seed, args.dry_run)
-    store = f"runs/aggregation/m14_s{seed}/store"
-    for split in ("val", "test"):
-        if args.dry_run or not (ROOT / ensemble / f"eval_{split}_rows.jsonl").exists():
-            execute(["scripts/eval_surrogate_regimes.py", "--ensemble", ensemble, "--store", store, "--split", split],
-                    args.dry_run)
-    execute(["scripts/build_paper_tables.py", "--arms", f"{STUDY}/arms.json", "--seed", seed,
-             "--ensemble", ensemble, "--sets", *args.sets, "--out", f"{STUDY}/tables"], args.dry_run)
+    """Table I (final ensemble on the study store's val/test splits), Table II and the headline reductions.
+    With several seeds: per-seed tables in tables/seed_<s>/ and their summary (mean ± sd, seed-level CIs)."""
+    for seed in args.seeds:
+        ensemble = final_ensemble(seed, args.dry_run)
+        store = f"runs/aggregation/m14_s{seed}/store"
+        for split in ("val", "test"):
+            if args.dry_run or not (ROOT / ensemble / f"eval_{split}_rows.jsonl").exists():
+                execute(["scripts/eval_surrogate_regimes.py", "--ensemble", ensemble, "--store", store, "--split", split],
+                        args.dry_run)
+    if len(args.seeds) > 1:
+        execute(["scripts/build_paper_tables.py", "--arms", f"{STUDY}/arms.json", "--seeds", *args.seeds,
+                 "--sets", *args.sets, "--out", f"{STUDY}/tables"], args.dry_run)
+    else:
+        execute(["scripts/build_paper_tables.py", "--arms", f"{STUDY}/arms.json", "--seed", args.seeds[0],
+                 "--ensemble", final_ensemble(args.seeds[0], args.dry_run), "--sets", *args.sets,
+                 "--out", f"{STUDY}/tables"], args.dry_run)
 
 
 def report(args) -> None:
@@ -279,11 +285,15 @@ def _run_branches(branches: dict[str, list[str]], args) -> None:
     (ROOT / "runs/logs").mkdir(parents=True, exist_ok=True)
     failures: dict[str, str] = {}
 
-    def run_branch(name: str, stages: list[str]) -> None:
+    def run_branch(name: str, stages: list) -> None:
         log_path = ROOT / f"runs/logs/pipeline_{name}.log"
         with log_path.open("a", encoding="utf-8") as log:
             for stage in stages:
-                cmd = [sys.executable, str(ROOT / "run.py"), stage, *_stage_argv(stage, args)]
+                stage_args = args
+                if isinstance(stage, tuple):              # (stage, seed): a branch for another policy seed
+                    stage, seed = stage
+                    stage_args = argparse.Namespace(**{**vars(args), "seed": seed})
+                cmd = [sys.executable, str(ROOT / "run.py"), stage, *_stage_argv(stage, stage_args)]
                 log.write(f"\n[{datetime.now(timezone.utc).isoformat()}] $ {shlex.join(cmd)}\n"); log.flush()
                 code = subprocess.run(cmd, cwd=ROOT, env=runtime_env(), stdout=log, stderr=subprocess.STDOUT).returncode
                 if code != 0:
@@ -293,7 +303,8 @@ def _run_branches(branches: dict[str, list[str]], args) -> None:
 
     threads = [threading.Thread(target=run_branch, args=item) for item in branches.items()]
     for name, stages in branches.items():
-        print(f"[pipeline] branch {name}: {' -> '.join(stages)} (log runs/logs/pipeline_{name}.log)", flush=True)
+        steps = " -> ".join(f"{s[0]} --seed {s[1]}" if isinstance(s, tuple) else s for s in stages)
+        print(f"[pipeline] branch {name}: {steps} (log runs/logs/pipeline_{name}.log)", flush=True)
     for t in threads:
         t.start()
     for t in threads:
@@ -319,6 +330,34 @@ def pipeline(args) -> None:
     else:
         for stage in (deeponet, surrogate_ppo, sumo_ppo, baselines):
             stage(args)
+    for stage in (evaluate, tables, report):
+        stage(args)
+
+
+def seeds(args) -> None:
+    """More policy seeds for a finished seed-0 study. The initial data, the round-0 ensemble and the tuned
+    baselines are shared; each new seed's surrogate-PPO loop and direct SUMO-PPO run as concurrent branches
+    (logs runs/logs/pipeline_{surrogate,direct}_s<seed>.log), then seed 0 and the new seeds are evaluated
+    (seed 0's results are reused) and tabulated. Use --torch-threads so the branches share the CPU."""
+    for path, instruction in ((f"{STORE}/split_index.json", "Run: python run.py data"),
+                              (f"{ENSEMBLE}/manifest.json", "Run: python run.py deeponet"),
+                              (f"{STUDY}/alinea_tuning.json", "Run: python run.py baselines"),
+                              ("runs/aggregation/m14_s0/rounds.json", "Run the seed-0 study first (python run.py pipeline)")):
+        require(path, args.dry_run, instruction)
+    if args.recover_interrupted:
+        os.environ["M14_RECOVER_INTERRUPTED"] = "1"      # inherited by every stage and child process
+    new = [s for s in dict.fromkeys(args.new_seeds) if s != 0]
+    branches = {}
+    for s in new:
+        branches[f"surrogate_s{s}"] = [("surrogate-ppo", s)]
+        branches[f"direct_s{s}"] = [("sumo-ppo", s)]
+    if args.dry_run:
+        for s in new:
+            for stage in (surrogate_ppo, sumo_ppo):
+                stage(argparse.Namespace(**{**vars(args), "seed": s}))
+    else:
+        _run_branches(branches, args)
+    args.seeds = [0, *new]
     for stage in (evaluate, tables, report):
         stage(args)
 
@@ -418,6 +457,9 @@ def parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--dry-run", action="store_true", help="show the steps without running them")
     common.add_argument("--workers", type=positive_int, default=8, help="parallel SUMO workers (default: 8)")
+    common.add_argument("--torch-threads", type=positive_int, default=None,
+                        help="CPU threads per PPO training process (sets M14_TORCH_THREADS for every child process; "
+                             "default: all cores); use it when several studies share one machine")
     sim = sub.add_parser("simulate", parents=[common], help="save one SUMO trajectory before any training")
     sim.add_argument("--policy", default="u=0.5", help="u=0.5, an ALINEA spec, or a PPO .zip path")
     sim.add_argument("--set", choices=["val", "test", "ood"], default="val")
@@ -434,6 +476,7 @@ def parser() -> argparse.ArgumentParser:
                     "tables": "build the paper's Table I, Table II and headline TTS reductions",
                     "report": "plot held-out returns against simulation cost",
                     "pipeline": "run the complete M14 study (hours of computation)",
+                    "seeds": "train more policy seeds on the finished seed-0 study in parallel, then evaluate and tabulate all seeds",
                     "smoke": "test the end-to-end workflow in a separate temporary project"}
     for name, description in descriptions.items():
         p = sub.add_parser(name, help=description, parents=[common])
@@ -441,16 +484,18 @@ def parser() -> argparse.ArgumentParser:
             p.add_argument("--members", type=positive_int, default=5)
         if name in ("surrogate-ppo", "sumo-ppo", "pipeline"):
             p.add_argument("--seed", type=int, default=0)
-        if name in ("surrogate-ppo", "pipeline"):
+        if name == "seeds":
+            p.add_argument("--new-seeds", type=int, nargs="+", default=[1, 2], help="policy seeds to add (default: 1 2)")
+        if name in ("surrogate-ppo", "pipeline", "seeds"):
             p.add_argument("--rounds", type=positive_int, default=5)
             p.add_argument("--steps", type=positive_int, default=300000, help="surrogate PPO steps per round")
-        if name in ("sumo-ppo", "evaluate", "pipeline"):
+        if name in ("sumo-ppo", "evaluate", "pipeline", "seeds"):
             p.add_argument("--budgets", type=positive_int, nargs="+", default=[1000], help="direct PPO training budgets in episodes")
-        if name in ("evaluate", "tables", "pipeline"):
+        if name in ("evaluate", "tables", "pipeline", "seeds"):
             if name in ("evaluate", "tables"):
                 p.add_argument("--seeds", type=int, nargs="+", default=[0], help="trained policy seeds to include")
             p.add_argument("--sets", choices=["test", "ood", "val"], nargs="+", default=["test", "ood"])
-        if name in ("evaluate", "pipeline"):
+        if name in ("evaluate", "pipeline", "seeds"):
             p.add_argument("--mpc", action=argparse.BooleanOptionalAction, default=True,
                            help="evaluate Surrogate-MPC on the last aggregation ensemble (default: on)")
             p.add_argument("--mpc-args", default="iters=30", help="MPC options appended to the spec, e.g. H=20,iters=30")
@@ -459,6 +504,9 @@ def parser() -> argparse.ArgumentParser:
             p.add_argument("--rhos", type=float, nargs="+", default=None, help="ALINEA target densities, veh/km")
             p.add_argument("--kis", type=float, nargs="+", default=None, help="ALINEA integral gains")
             p.add_argument("--kps", type=float, nargs="+", default=None, help="PI-ALINEA proportional gains")
+        if name == "seeds":
+            p.add_argument("--recover-interrupted", action="store_true",
+                           help="rerun work cut off by a lost session (see pipeline --recover-interrupted)")
         if name == "pipeline":
             p.add_argument("--parallel", action="store_true",
                            help="after the data stage run [deeponet -> surrogate-ppo], sumo-ppo and baselines concurrently")
@@ -474,10 +522,12 @@ def main() -> None:
     args = parser().parse_args()
     os.chdir(ROOT)
     os.environ.pop("SCENARIO_OVERLAY", None)
+    if getattr(args, "torch_threads", None):
+        os.environ["M14_TORCH_THREADS"] = str(args.torch_threads)     # read by rl.train_ppo in every child process
     os.environ.update(runtime_env())
     commands = {"simulate": simulate, "e0": e0, "data": data, "deeponet": deeponet, "surrogate-ppo": surrogate_ppo,
                 "sumo-ppo": sumo_ppo, "baselines": baselines, "evaluate": evaluate, "tables": tables, "report": report,
-                "pipeline": pipeline, "smoke": smoke}
+                "pipeline": pipeline, "seeds": seeds, "smoke": smoke}
     try:
         if args.command == "check":
             check_environment()

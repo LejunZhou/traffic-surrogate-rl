@@ -58,6 +58,13 @@ The best round may be earlier than 5, and the stop rule may end training early.
 Selection details are recorded in `runs/aggregation/m14_s0/study.json`.
 `pipeline --seed 1` trains and evaluates seed 1; it does not launch a seed sweep.
 `evaluate --seeds 0 1` includes those already-trained seeds.
+`seeds --new-seeds 1 2` is the seed sweep for a finished seed-0 study: every new
+seed's surrogate-PPO loop and direct PPO run as concurrent branches (logs
+`runs/logs/pipeline_{surrogate,direct}_s<seed>.log`), then `evaluate`, `tables`
+and `report` cover seed 0 and the new seeds. Seed 0's evaluations are reused (same
+request fingerprints). `tables --seeds 0 1 2` writes each seed's tables to
+`tables/seed_<s>/` and a summary to `tables/tables.md`: mean ± sd over seeds and
+headline reductions with a hierarchical bootstrap CI (seeds, then episodes).
 
 For low-level module entry points, set `PYTHONPATH=src` or install this package
 in its dedicated environment. The public `run.py` handles this automatically.
@@ -85,6 +92,14 @@ uninterrupted run. Use it only when no other study process is running.
 Individual scripts expose more options through `--help`. Reuse is not a cache
 key based on every setting: after changing configuration, use a fresh project
 copy or explicitly select fresh output paths through the individual scripts.
+
+The surrogate environment advances each member's GRU by one input per control
+step (`BranchCache`) instead of rerunning it over the whole history; outputs are
+identical up to float round-off and PPO steps run about 5-8x faster
+(`env.incremental_branch: false` restores the full recompute). `--torch-threads N`
+caps the CPU threads of every PPO process (`M14_TORCH_THREADS`); without it torch
+takes all cores, which oversubscribes the CPU when several studies share one
+machine. 2-4 threads per process were fastest in a local benchmark.
 
 The full study keeps the M14 300,000 surrogate steps/round; the direct-PPO
 default is one run at a nominal 1000 episodes, validated every 9600 steps

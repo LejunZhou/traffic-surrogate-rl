@@ -77,6 +77,9 @@ concurrently after the data stage. Inspect its commands first with `python run.p
 Completed stage outputs are reused; aggregation resumes recorded rounds and the
 direct PPO run continues from its latest checkpoint. On Google Colab use
 `../colab/m14_ramp60.ipynb` (it adds `--recover-interrupted`, see the workflow notes).
+More policy seeds on a finished seed-0 study: `python run.py seeds --new-seeds 1 2 --torch-threads 4`
+trains each new seed's surrogate-PPO and direct PPO concurrently (shared data, ensemble and baselines),
+then evaluates and tabulates all seeds (mean ± sd, seed-level CIs; Colab: `../colab/m14_seeds.ipynb`).
 Use a fresh copy for experiments with changed configurations so outputs do not
 mix settings. [Workflow details](docs/workflow.md) cover custom commands and outputs.
 

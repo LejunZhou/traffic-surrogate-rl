@@ -51,6 +51,9 @@ class SurrogateVecEnv(VecEnv):
             else:
                 raise ValueError(f"unknown plant_type {plant_type!r}")
         self.plant = plant
+        # step-by-step GRU state (same outputs as rerunning the branch over the history, O(1) per step)
+        self._branch_cache = (plant.new_branch_cache(self.n_envs)
+                              if bool(cfg.get("incremental_branch", True)) and hasattr(plant, "new_branch_cache") else None)
         self.M = int(plant.M)
         self.K = int(plant.K)
         self.T_ctrl = self.K
@@ -169,10 +172,13 @@ class SurrogateVecEnv(VecEnv):
         self.history[idx, 1, k] = q_r_vph / self.norm.inflow_scale
         # ---- plant ---------------------------------------------------------
         rho_members = q_members = None
+        cache = self._branch_cache
         if self.mode == "sample" and not self.log_ensemble_std:
-            rho, q_out = self.plant.predict_step(self.history, k, self.member)
+            rho, q_out = (self.plant.predict_step(self.history, k, self.member) if cache is None
+                          else self.plant.predict_step_cached(self.history, k, self.member, cache))
         else:
-            rho_members, q_members = self.plant.predict_all_members_step(self.history, k)   # (M, n, Nx), (M, n)
+            rho_members, q_members = (self.plant.predict_all_members_step(self.history, k) if cache is None
+                                      else self.plant.predict_all_members_step_cached(self.history, k, cache))   # (M, n, Nx), (M, n)
             if self.mode == "sample":
                 rho = rho_members[self.member, idx]; q_out = q_members[self.member, idx]
             else:
@@ -294,6 +300,8 @@ class SurrogateVecEnv(VecEnv):
         self.r[i] = p.ramp_vph[: self.K]
         self.history[i, 0] = self.d[i] / self.norm.demand_scale
         self.history[i, 1] = 0.0
+        if self._branch_cache is not None:
+            self._branch_cache.reset_rows(i)
         self.k[i] = 0
         self.queue[i] = 0.0
         self.member[i] = int(self.member_rng.integers(0, self.M)) if self.mode == "sample" else 0

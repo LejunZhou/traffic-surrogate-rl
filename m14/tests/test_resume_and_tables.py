@@ -147,3 +147,31 @@ def test_alinea_edge_check():
     edges = edge_check("pialinea:kp=8,ki=20,rho=20,det=14", grid)
     assert set(edges) == {"kp", "rho"} and "lowest" in edges["rho"] and "highest" in edges["kp"]
     assert edge_check("alinea:ki=20,rho=26,det=13", {"dets": [13], "rhos": [26], "kis": [20]}) == {}   # single values
+
+
+def test_seed_summary_and_hierarchical_reduction():
+    from build_paper_tables import seed_reduction, seed_summary
+
+    def rows(tts, n=6):
+        return [{"profile_set": "test", "profile_index": i, "sumo_seed": 100, "tts_veh_h": tts} for i in range(n)]
+
+    def metrics(tts):
+        return {"tts": tts, "mean_queue": 1.0, "max_queue": 2.0, "completed_trips": 3.0, "breakdown_rate": 0.0}
+
+    per_seed = {}
+    for seed, ours in ((0, 9.0), (1, 8.0), (2, 7.0)):
+        t2 = {"rows": {"PI-ALINEA": {"test": metrics(10.0), "sumo_episodes": 882, "compute_h": 4.9},
+                       "Surrogate-PPO": {"test": metrics(ours), "sumo_episodes": 962, "compute_h": 8.0}}}
+        episodes = {("PI-ALINEA", "test"): rows(10.0), ("Surrogate-PPO", "test"): rows(ours)}
+        per_seed[seed] = (None, t2, episodes)
+    summary = seed_summary(per_seed, ("test",))
+    ours = summary["table2"]["Surrogate-PPO"]["test"]["tts"]
+    assert ours["mean"] == pytest.approx(8.0) and ours["sd"] == pytest.approx(1.0) and ours["per_seed"] == [9.0, 8.0, 7.0]
+    assert summary["table2"]["PI-ALINEA"]["test"]["tts"]["sd"] == 0.0
+    head = summary["headline"]["Surrogate-PPO vs PI-ALINEA (test)"]
+    assert head["reduction_pct"] == pytest.approx(20.0) and head["per_seed_pct"] == pytest.approx([10.0, 20.0, 30.0])
+    assert head["n_seeds"] == 3 and head["n_pairs"] == 18
+    lo, hi = head["ci95_pct"]
+    assert 10.0 - 1e-9 <= lo < 20.0 < hi <= 30.0 + 1e-9               # seed resampling spans the per-seed spread
+    with pytest.raises(ValueError):
+        seed_reduction([np.empty((0, 2))])

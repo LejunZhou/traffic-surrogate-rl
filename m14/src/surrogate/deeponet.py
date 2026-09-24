@@ -159,10 +159,28 @@ def load_plant_checkpoint(path: str | _Path, device: str = "cpu") -> tuple[Plant
     return model, ckpt, PlantNormalisation.from_dict(ckpt["normalization"])
 
 
+class BranchCache:
+    """GRU hidden state of every (member, row) pair for step-by-step prediction.
+
+    h[m] (layers, n, hidden) is member m's state after steps[m, i] inputs of row i. `reset_rows` must be called
+    when a row starts a new history (the environment does this on every slot reset).
+    """
+
+    def __init__(self, n_members: int, layers: int, n_rows: int, hidden: int, device: torch.device) -> None:
+        self.h = torch.zeros(n_members, layers, n_rows, hidden, device=device)
+        self.steps = _np.zeros((n_members, n_rows), dtype=_np.int64)
+
+    def reset_rows(self, rows) -> None:
+        rows = _np.atleast_1d(_np.asarray(rows, dtype=_np.int64))
+        self.h[:, :, torch.from_numpy(rows).to(self.h.device)] = 0.0
+        self.steps[:, rows] = 0
+
+
 class DeepONetEnsemble:
     """M GRU DeepONet members loaded from <dir>/manifest.json.
 
     predict_step(branch (n, 2, K), k (n,), member (n,)) -> rho (n, Nx), q_out (n,)
+    predict_step_cached(..., cache)  same outputs, GRU advanced one input per call (environment stepping)
     predict_full(branch (n, 2, K)) -> rho (M, n, Nx, K), q_out (M, n, K)
     """
 
@@ -229,15 +247,72 @@ class DeepONetEnsemble:
         member = _np.asarray(member, dtype=_np.int64)
         for m in _np.unique(member):
             rows = _np.where(member == m)[0]
-            model = self.members[int(m)]
-            b_all = model.branch(x[rows])                                   # (r, K, p)
+            b_all = self.members[int(m)].branch(x[rows])                     # (r, K, p)
             kk = torch.from_numpy(k[rows]).to(self.device)
             b = b_all[torch.arange(len(rows)), kk]   # (r, p)
-            tau = self.tables[int(m)][kk]                                    # (r, Nx+1, 2p)
-            r_hat, q_hat = model.combine(b.unsqueeze(1).expand(-1, tau.shape[1], -1), tau)
-            rho[rows] = self.norm.z_to_density(r_hat[:, : self.Nx]).cpu().numpy()
-            q[rows] = (q_hat[:, self.Nx] * self.norm.flow_scale).cpu().numpy()
+            rho[rows], q[rows] = self._read_out(int(m), b, kk)
         return rho, q
+
+    def _read_out(self, m: int, b: torch.Tensor, kk: torch.Tensor) -> tuple[_np.ndarray, _np.ndarray]:
+        """Branch features b (r, p) at steps kk (r,) -> physical density (r, Nx) and exit flow (r,)."""
+        tau = self.tables[m][kk]                                             # (r, Nx+1, 2p)
+        r_hat, q_hat = self.members[m].combine(b.unsqueeze(1).expand(-1, tau.shape[1], -1), tau)
+        return (self.norm.z_to_density(r_hat[:, : self.Nx]).cpu().numpy(),
+                (q_hat[:, self.Nx] * self.norm.flow_scale).cpu().numpy())
+
+    def new_branch_cache(self, n: int) -> "BranchCache":
+        gru = self.members[0].branch.gru
+        return BranchCache(self.M, gru.num_layers, n, gru.hidden_size, self.device)
+
+    @torch.no_grad()
+    def predict_step_cached(self, branch_in: _np.ndarray, k: _np.ndarray, member: _np.ndarray,
+                            cache: "BranchCache") -> tuple[_np.ndarray, _np.ndarray]:
+        """predict_step with the GRU advanced by one input per call instead of rerun over the whole history.
+
+        The branch is causal, so its read-out at step k depends only on the hidden state after inputs 0..k-1
+        and on input k: the outputs equal predict_step's up to float round-off, at O(1) instead of O(K) cost.
+        Contract: history entries a row has already consumed are not changed without `cache.reset_rows`.
+        """
+        n = branch_in.shape[0]
+        rho = _np.zeros((n, self.Nx), dtype=_np.float32)
+        q = _np.zeros(n, dtype=_np.float32)
+        hist = _np.asarray(branch_in, dtype=_np.float32)
+        k = _np.asarray(k, dtype=_np.int64)
+        member = _np.asarray(member, dtype=_np.int64)
+        for m in _np.unique(member):
+            m = int(m)
+            rows = _np.where(member == m)[0]
+            branch = self.members[m].branch
+            self._sync_cache(cache, m, rows, hist, k)
+            idx = torch.from_numpy(rows).to(self.device)
+            x_t = torch.from_numpy(hist[rows, :, k[rows]]).unsqueeze(1).to(self.device)     # (r, 1, 2): input k only
+            out, h = branch.gru(x_t, cache.h[m][:, idx].contiguous())
+            cache.h[m][:, idx] = h
+            cache.steps[m, rows] = k[rows] + 1
+            rho[rows], q[rows] = self._read_out(m, branch.out(out[:, 0]), torch.from_numpy(k[rows]).to(self.device))
+        return rho, q
+
+    @torch.no_grad()
+    def predict_all_members_step_cached(self, branch_in: _np.ndarray, k: _np.ndarray,
+                                        cache: "BranchCache") -> tuple[_np.ndarray, _np.ndarray]:
+        """predict_all_members_step through the incremental GRU (see predict_step_cached)."""
+        outs = [self.predict_step_cached(branch_in, k, _np.full(len(k), m), cache) for m in range(self.M)]
+        return _np.stack([r for r, _ in outs]), _np.stack([q for _, q in outs])
+
+    def _sync_cache(self, cache: "BranchCache", m: int, rows: _np.ndarray, hist: _np.ndarray, k: _np.ndarray) -> None:
+        """Rebuild the hidden state of rows whose member m has not consumed exactly inputs 0..k-1
+        (a member that was not queried at the previous step, or a row queried out of order)."""
+        stale = rows[cache.steps[m, rows] != k[rows]]
+        for kb in _np.unique(k[stale]):
+            sel = stale[k[stale] == kb]
+            idx = torch.from_numpy(sel).to(self.device)
+            if kb == 0:
+                cache.h[m][:, idx] = 0.0
+            else:
+                x = torch.from_numpy(hist[sel, :, :kb]).to(self.device).transpose(1, 2)    # (r, kb, 2)
+                _, h = self.members[m].branch.gru(x)
+                cache.h[m][:, idx] = h
+            cache.steps[m, sel] = kb
 
     @torch.no_grad()
     def predict_all_members_step(self, branch_in: _np.ndarray, k: _np.ndarray) -> tuple[_np.ndarray, _np.ndarray]:

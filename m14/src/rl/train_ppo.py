@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 import random
 import re
 import sys
@@ -161,6 +162,12 @@ def train(config: dict) -> None:
     output_cfg = config.get("output", {})
     seed = int(training_cfg.get("seed", 42))
     _set_seed(seed, torch)
+    # CPU thread cap (training.torch_threads, else M14_TORCH_THREADS): torch otherwise takes every core, so
+    # concurrent runs (e.g. two policy seeds on one machine) would oversubscribe the CPU
+    threads = training_cfg.get("torch_threads") or os.environ.get("M14_TORCH_THREADS")
+    if threads:
+        torch.set_num_threads(int(threads))
+        print(f"[train_ppo] torch threads: {torch.get_num_threads()}", flush=True)
 
     project_root = Path(config.get("project_root", Path(__file__).resolve().parents[2])).resolve()
     env_cfg.setdefault("project_root", str(project_root))

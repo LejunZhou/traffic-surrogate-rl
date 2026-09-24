@@ -31,6 +31,9 @@ Tables I and II. The whole study runs on Colab: the local Windows machine lost t
    `scripts/compare_e0_capacity.py` (capacity at 60 vs 120 km/h, reference report copied into m14/).
 6. `colab/m14_ramp60.ipynb`: Drive working copy, SUMO wheel, capacity gate, background pipeline, status, tables.
 
+7. (2026-09-23, after seed 0) Incremental GRU branch in the surrogate environment (same outputs, ≈ 5–8× faster
+   surrogate PPO) and a CPU thread cap for PPO processes (`run.py --torch-threads`), so seeds 1–2 can run in parallel.
+
 ## Verification
 Unit tests (resume bookkeeping, table maths); `run.py smoke` extended with an interrupted-and-resumed direct
 PPO run and MPC; notebook cells checked for syntax (Colab itself cannot be exercised locally).
