@@ -216,52 +216,94 @@ def fig_error_map(ens, store, files, out: Path) -> dict:
             "x_grid_m": ens.x_grid.tolist()}
 
 
-def fig_case_studies(ens, store, reps, out: Path) -> None:
+def _draw_case_panels(fig, ens, store, r: dict, ax_demand, ax_u, ax_ramp, ax_true, ax_pred, ax_flow, first_col: bool = True,
+                      title: bool = True) -> None:
+    """Draw the six case-study panels of one rollout into the given axes."""
+    arrays, meta, rho_m, q_m = _predict(ens, store, r["file"])
+    t_min = np.arange(ens.K) * ens.dt / 60.0
+    extent = [t_min[0], t_min[-1] + ens.dt / 60.0, ens.x_grid[0] - 50, ens.x_grid[-1] + 50]
+    true = arrays["density"].astype(np.float64); pred = rho_m.mean(0)
+    vmax = max(float(true.max()), float(pred.max()), 60.0)
+    ax = ax_demand
+    ax.plot(t_min, arrays["mainline_demand"], color=PALETTE[0], lw=2, label="mainline demand d(t)")
+    ax.plot(t_min, arrays["ramp_arrival"], color=PALETTE[1], lw=2, label="ramp arrivals r(t)")
+    ax.plot(t_min, arrays["mainline_demand"] + arrays["ramp_arrival"], color=MUTED, lw=1, ls="--", label="total offered")
+    ax.axhline(2500, color=PALETTE[7], lw=0.8, ls=":", label="≈ merge capacity")
+    ax.set_ylim(0, 3200); ax.grid(True)
+    if title:
+        ax.set_title(f"{r['group']} · {'breakdown' if r['breakdown_true'] else 'no breakdown'}\n{Path(r['file']).name}", fontsize=8.5)
+    if first_col: ax.set_ylabel("demand (veh/h)"); ax.legend(fontsize=6.5, loc="lower right")
+    ax = ax_u
+    ax.step(t_min, arrays["action"], where="post", color=TEXT, lw=1.6)
+    ax.set_ylim(-0.02, 1.02); ax.grid(True)
+    if first_col: ax.set_ylabel("metering rate u")
+    ax = ax_ramp
+    ax.plot(t_min, arrays["ramp_arrival"], color=PALETTE[1], lw=1, ls=":", label="ramp arrivals")
+    ax.plot(t_min, arrays["ramp_inflow_vph"], color=PALETTE[1], lw=1.6, label="ramp inflow (metered)")
+    ax.set_ylim(0, 1400); ax.grid(True)
+    ax.text(0.98, 0.93, f"max ramp queue {arrays['ramp_queue'].max():.0f} veh", transform=ax.transAxes, fontsize=7, ha="right", va="top", color=MUTED)
+    if first_col: ax.set_ylabel("ramp flow (veh/h)"); ax.legend(fontsize=6.5, loc="upper left")
+    for ax, field, label, ylab in [(ax_true, true, "SUMO", "SUMO density"),
+                                   (ax_pred, pred, f"DeepONet  (rel-L2 {r['rel_l2_density']:.3f})", "DeepONet ensemble mean")]:
+        im = ax.imshow(field, aspect="auto", origin="lower", cmap="Blues", vmin=0, vmax=vmax, extent=extent, interpolation="nearest")
+        ax.axhline(MERGE_M, color=TEXT, lw=0.8, ls="--", alpha=0.6)
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02).ax.tick_params(labelsize=7)
+        ax.text(0.02, 0.95, label, transform=ax.transAxes, fontsize=8, va="top", bbox=dict(fc="white", ec="none", alpha=0.8))
+        if first_col: ax.set_ylabel(ylab + "\nx (m)", fontsize=8.5)
+    ax = ax_flow
+    q_true, q_pred, q_std = arrays["outflow_vph"].astype(np.float64), q_m.mean(0), q_m.std(0)
+    ax.fill_between(t_min, q_pred - 2 * q_std, q_pred + 2 * q_std, color=PALETTE[2], alpha=0.2, lw=0, label="ensemble ±2 std")
+    ax.plot(t_min, q_true, color=TEXT, lw=1.8, label="SUMO exit flow")
+    ax.plot(t_min, q_pred, color=PALETTE[2], lw=1.8, label="DeepONet")
+    ax.set_ylim(0, 2700); ax.grid(True); ax.set_xlabel("time (min)")
+    ax.text(0.02, 0.06, f"rel-L2 {r['rel_l2_flow']:.3f}\nreturn true {r['return_true']:.1f} / pred {r['return_pred']:.1f}", transform=ax.transAxes, fontsize=7.5)
+    if first_col: ax.set_ylabel("exit flow (veh/h)"); ax.legend(fontsize=6.5, loc="center right")
+
+
+def fig_case_studies(ens, store, reps, out: Path, stem: str = "fig_f_case_studies") -> None:
     """One column per rollout: demand, metering rate, ramp inflow, SUMO density, predicted density, exit flow."""
     n = len(reps)
     fig, axes = plt.subplots(6, n, figsize=(3.6 * n, 14.5), dpi=150, constrained_layout=True, sharex="col", squeeze=False,
                              gridspec_kw={"height_ratios": [1.1, 0.7, 0.9, 1.4, 1.4, 1.1]})
+    for i, r in enumerate(reps):
+        _draw_case_panels(fig, ens, store, r, *axes[:, i], first_col=(i == 0))
+    fig.suptitle("Held-out test rollouts: demand → metering rate → ramp inflow → SUMO density vs DeepONet prediction → exit flow (dashed line = merge at 1300 m)", fontsize=10)
+    fig.savefig(out / f"{stem}.png"); fig.savefig(out / f"{stem}.pdf"); plt.close(fig)
+
+
+def fig_case_single(ens, store, r: dict, out: Path, stem: str) -> None:
+    """Landscape single-rollout case study, one row of four panels sharing the time axis:
+    inputs (mainline demand, ramp arrivals, metered ramp inflow) | SUMO density | DeepONet density | exit flow."""
+    FS_LAB, FS_TICK, FS_LEG = 12, 10.5, 10.5
+    arrays, meta, rho_m, q_m = _predict(ens, store, r["file"])
     t_min = np.arange(ens.K) * ens.dt / 60.0
     extent = [t_min[0], t_min[-1] + ens.dt / 60.0, ens.x_grid[0] - 50, ens.x_grid[-1] + 50]
-    for i, r in enumerate(reps):
-        arrays, meta, rho_m, q_m = _predict(ens, store, r["file"])
-        true = arrays["density"].astype(np.float64); pred = rho_m.mean(0)
-        vmax = max(float(true.max()), float(pred.max()), 60.0)
-        ax = axes[0, i]
-        ax.plot(t_min, arrays["mainline_demand"], color=PALETTE[0], lw=2, label="mainline demand d(t)")
-        ax.plot(t_min, arrays["ramp_arrival"], color=PALETTE[1], lw=2, label="ramp arrivals r(t)")
-        ax.plot(t_min, arrays["mainline_demand"] + arrays["ramp_arrival"], color=MUTED, lw=1, ls="--", label="total offered")
-        ax.axhline(2500, color=PALETTE[7], lw=0.8, ls=":", label="≈ merge capacity")
-        ax.set_ylim(0, 3200); ax.grid(True)
-        ax.set_title(f"{r['group']} · {'breakdown' if r['breakdown_true'] else 'no breakdown'}\n{r['file']}", fontsize=8.5)
-        if i == 0: ax.set_ylabel("demand (veh/h)"); ax.legend(fontsize=6.5, loc="lower right")
-        ax = axes[1, i]
-        ax.step(t_min, arrays["action"], where="post", color=TEXT, lw=1.6)
-        ax.set_ylim(-0.02, 1.02); ax.grid(True)
-        if i == 0: ax.set_ylabel("metering rate u")
-        ax = axes[2, i]
-        ax.plot(t_min, arrays["ramp_arrival"], color=PALETTE[1], lw=1, ls=":", label="ramp arrivals")
-        ax.plot(t_min, arrays["ramp_inflow_vph"], color=PALETTE[1], lw=1.6, label="ramp inflow (metered)")
-        ax.set_ylim(0, 1400); ax.grid(True)
-        ax.text(0.98, 0.93, f"max ramp queue {arrays['ramp_queue'].max():.0f} veh", transform=ax.transAxes, fontsize=7, ha="right", va="top", color=MUTED)
-        if i == 0: ax.set_ylabel("ramp flow (veh/h)"); ax.legend(fontsize=6.5, loc="upper left")
-        for row, field, label in [(3, true, "SUMO"), (4, pred, f"DeepONet  (rel-L2 {r['rel_l2_density']:.3f})")]:
-            ax = axes[row, i]
-            im = ax.imshow(field, aspect="auto", origin="lower", cmap="Blues", vmin=0, vmax=vmax, extent=extent, interpolation="nearest")
-            ax.axhline(MERGE_M, color=TEXT, lw=0.8, ls="--", alpha=0.6)
-            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02).ax.tick_params(labelsize=7)
-            ax.text(0.02, 0.95, label, transform=ax.transAxes, fontsize=8, va="top", bbox=dict(fc="white", ec="none", alpha=0.8))
-            if i == 0: ax.set_ylabel(("SUMO density" if row == 3 else "DeepONet ensemble mean") + "\nx (m)", fontsize=8.5)
-        ax = axes[5, i]
-        q_true, q_pred, q_std = arrays["outflow_vph"].astype(np.float64), q_m.mean(0), q_m.std(0)
-        ax.fill_between(t_min, q_pred - 2 * q_std, q_pred + 2 * q_std, color=PALETTE[2], alpha=0.2, lw=0, label="ensemble ±2 std")
-        ax.plot(t_min, q_true, color=TEXT, lw=1.8, label="SUMO exit flow")
-        ax.plot(t_min, q_pred, color=PALETTE[2], lw=1.8, label="DeepONet")
-        ax.set_ylim(0, 2700); ax.grid(True); ax.set_xlabel("time (min)")
-        ax.text(0.02, 0.06, f"rel-L2 {r['rel_l2_flow']:.3f}\nreturn true {r['return_true']:.1f} / pred {r['return_pred']:.1f}", transform=ax.transAxes, fontsize=7.5)
-        if i == 0: ax.set_ylabel("exit flow (veh/h)"); ax.legend(fontsize=6.5, loc="center right")
-    fig.suptitle("Held-out test rollouts: demand → metering rate → ramp inflow → SUMO density vs DeepONet prediction → exit flow (dashed line = merge at 1300 m)", fontsize=10)
-    fig.savefig(out / "fig_f_case_studies.png"); fig.savefig(out / "fig_f_case_studies.pdf"); plt.close(fig)
+    true = arrays["density"].astype(np.float64); pred = rho_m.mean(0)
+    vmax = max(float(true.max()), float(pred.max()), 60.0)
+    fig, (ax_in, ax_true, ax_pred, ax_flow) = plt.subplots(1, 4, figsize=(17.0, 4.4), dpi=150, constrained_layout=True,
+                                                            sharex=True, gridspec_kw={"width_ratios": [1.0, 1.15, 1.15, 1.0]})
+    ax = ax_in
+    ax.plot(t_min, arrays["mainline_demand"], color=PALETTE[0], lw=2, label="mainline demand")
+    ax.plot(t_min, arrays["ramp_arrival"], color=PALETTE[3], lw=2, label="ramp arrivals")
+    ax.plot(t_min, arrays["ramp_inflow_vph"], color=PALETTE[1], lw=1.8, label="ramp inflow (metered)")
+    ax.set_ylim(0, 2700); ax.grid(True); ax.set_xlabel("time (min)", fontsize=FS_LAB); ax.set_ylabel("flow (veh/h)", fontsize=FS_LAB)
+    ax.legend(fontsize=FS_LEG, loc="upper left", ncol=1)
+    for ax, field, label in [(ax_true, true, "SUMO"), (ax_pred, pred, "DeepONet")]:
+        im = ax.imshow(field, aspect="auto", origin="lower", cmap="Blues", vmin=0, vmax=vmax, extent=extent, interpolation="nearest")
+        ax.axhline(MERGE_M, color=TEXT, lw=0.8, ls="--", alpha=0.6)
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02).ax.tick_params(labelsize=FS_TICK)
+        ax.text(0.02, 0.95, label, transform=ax.transAxes, fontsize=FS_LAB, va="top", bbox=dict(fc="white", ec="none", alpha=0.8))
+        ax.set_xlabel("time (min)", fontsize=FS_LAB); ax.set_ylabel("x (m)", fontsize=FS_LAB)
+    ax = ax_flow
+    q_true, q_pred, q_std = arrays["outflow_vph"].astype(np.float64), q_m.mean(0), q_m.std(0)
+    ax.plot(t_min, q_true, color=TEXT, lw=1.8, label="SUMO exit flow")
+    ax.plot(t_min, q_pred, color=PALETTE[2], lw=1.8, label="DeepONet")
+    ax.set_ylim(0, 2700); ax.grid(True); ax.set_xlabel("time (min)", fontsize=FS_LAB); ax.set_ylabel("exit flow (veh/h)", fontsize=FS_LAB)
+    ax.legend(fontsize=FS_LEG, loc="center right")
+    fig.suptitle(f"{r['group']} · {'breakdown' if r['breakdown_true'] else 'no breakdown'} · "
+                 f"{Path(r['file']).name}   (dashed line = merge at 1300 m)", fontsize=FS_LAB + 1)
+    for ax in (ax_in, ax_true, ax_pred, ax_flow): ax.tick_params(labelsize=FS_TICK)
+    fig.savefig(out / f"{stem}.png"); fig.savefig(out / f"{stem}.pdf"); plt.close(fig)
 
 
 def fig_return_scatter(rows: list[dict], summary: dict, out: Path) -> None:
@@ -315,6 +357,11 @@ def main() -> None:
     ap.add_argument("--split", default="test")
     ap.add_argument("--rows", default=None, help="eval_<split>_rows.jsonl from eval_surrogate_regimes (default: inside the ensemble dir)")
     ap.add_argument("--out", default="_progress/figures/m9_plant_eval")
+    ap.add_argument("--case-pick", default="median", choices=["median", "busiest", "worst"],
+                    help="with --case: median return error (default), highest peak offered demand, or largest return error")
+    ap.add_argument("--case", default=None, metavar="GROUP[:breakdown|nobreakdown]",
+                    help="write only a one-column case-study figure (fig_f_case_<group>_<bd>.png) for the median-error "
+                         "rollout of that (regime, breakdown) cell, e.g. alinea_wide:breakdown; skips all other figures")
     args = ap.parse_args()
     ens = DeepONetEnsemble.load(PROJECT_ROOT / args.ensemble)
     store = Path(ens.manifest.get("store_dir", "data/plant_v2/round0"))
@@ -324,6 +371,23 @@ def main() -> None:
     rows = [json.loads(l) for l in rows_path.read_text().splitlines() if l.strip()]
     summary = json.loads((ens_dir / f"eval_{args.split}.json").read_text())
     out = PROJECT_ROOT / args.out; out.mkdir(parents=True, exist_ok=True)
+
+    if args.case:
+        group, _, bd_s = args.case.partition(":")
+        bd = (bd_s or "breakdown").lower() != "nobreakdown"
+        cand = [r for r in rows if r["group"] == group and bool(r["breakdown_true"]) == bd]
+        if not cand:
+            sys.exit(f"no rollout with group={group!r} and breakdown_true={bd} in {rows_path}")
+        if args.case_pick == "median":
+            reps1 = _pick_representatives(rows, [(group, bd)], min_n=1)
+        elif args.case_pick == "busiest":
+            reps1 = [max(cand, key=lambda r: r["peak_total"])]
+        else:
+            reps1 = [max(cand, key=lambda r: r["return_rel_err"])]
+        stem = f"fig_f_case_{group}_{'breakdown' if bd else 'nobreakdown'}" + ("" if args.case_pick == "median" else f"_{args.case_pick}")
+        print("case rollout:", reps1[0]["file"], round(reps1[0]["return_rel_err"], 3))
+        fig_case_single(ens, store, reps1[0], out, stem=stem)
+        print(f"written {out / stem}.png"); return
 
     groups_present = sorted({r["group"] for r in rows}, key=lambda g: REGIME_SLOT.get(g, 9))
     def cells(preferred):

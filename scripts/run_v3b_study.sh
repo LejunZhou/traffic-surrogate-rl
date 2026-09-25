@@ -87,11 +87,13 @@ log "round-0 gate on val: $(python -c "import json;print(json.load(open('$ENS/ev
 
 # ---------------------------------------------------------------- aggregation loop (A0, A1) per seed  ||  direct SUMO PPO (B)
 SETARGS=""; [ "$EVAL_FREQ" != "0" ] && SETARGS="--set training.eval_freq=$EVAL_FREQ"
+# RESUME=1: an interrupted loop continues from its last completed round (--resume; Colab sessions, restarts)
 for s in $SEEDS; do
+  RARG=""; [ "${RESUME:-0}" = "1" ] && [ -d runs/aggregation/${STUDY}_s$s/store ] && RARG="--resume"
   [ -f runs/aggregation/${STUDY}_s$s/study.json ] || \
     python scripts/run_aggregation_loop.py --study ${STUDY}_s$s --seed $s --rounds $ROUNDS --steps-per-round $STEPS_PER_ROUND \
       --ensemble $ENS --store $STORE --workers $WORKERS --stop-delta $STOP_DELTA --stop-patience $STOP_PATIENCE \
-      --finetune-epochs $FT_EPOCHS $SETARGS > runs/logs/${STUDY}_agg_s$s.log 2>&1 &
+      --finetune-epochs $FT_EPOCHS $SETARGS $RARG > runs/logs/${STUDY}_agg_s$s.log 2>&1 &
 done
 for ee in $DIRECT_EE; do
   for s in $SEEDS; do
