@@ -65,6 +65,16 @@ and `report` cover seed 0 and the new seeds. Seed 0's evaluations are reused (sa
 request fingerprints). `tables --seeds 0 1 2` writes each seed's tables to
 `tables/seed_<s>/` and a summary to `tables/tables.md`: mean ± sd over seeds and
 headline reductions with a hierarchical bootstrap CI (seeds, then episodes).
+`extend-direct --from-budget 1000 --to-budget 1200` trains the finished direct PPO
+runs of every seed (`--seeds`, default 0 1 2) longer: `direct_ppo_1200ee_s<seed>`
+starts as a copy of the 1000-episode run whose final model (policy, value net,
+optimizer, step count) is its latest checkpoint, with its validation history and
+ledger, so the longer run is charged for all its episodes and selects its
+checkpoint over the whole run. The runs continue concurrently, then `evaluate`,
+`tables` and `report` cover both budgets: Table II's SUMO-PPO row is the larger
+budget and `SUMO-PPO (1000 ep.)` keeps the smaller one, with headline reductions
+against both. A resumed session's checkpoints and evaluations stay on the
+`eval_freq` grid even when it starts from an off-grid final model.
 
 For low-level module entry points, set `PYTHONPATH=src` or install this package
 in its dedicated environment. The public `run.py` handles this automatically.

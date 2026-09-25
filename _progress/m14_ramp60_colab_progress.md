@@ -284,10 +284,120 @@ Reading:
 - Launched on Colab 2026-09-24 06:57 UTC (commit c3d07c0; 6 SUMO workers per branch, 4 torch threads). Seed 1
   round 1 surrogate PPO took 458 s (seed 0: 1946 s, ≈ 4.2× faster on Colab). Direct PPO runs at 7–9 steps/s
   (≈ 4–5 h for 120k steps), the long pole as expected.
+- Aggregation loops finished (stop rule in both, as for seed 0), PPO 6–8 min per round:
+
+  | seed | V per round (r1 → last) | selected | SUMO V | EE (selected / charged) | loop wall |
+  |---|---|---|---|---|---|
+  | 0 | −56.0, −45.6, −43.4, −44.0, −43.3 | r5 | −43.3 | 962 / 962 | 2.7 h |
+  | 1 | −56.6, −46.2, −42.6, …(r4–r5 no gain ≥ 2) | r3 | −42.6 | 854 / 962 | 58 min |
+  | 2 | −52.1, −43.8, −44.7, −43.2 | r4 | −43.2 | 908 / 908 | 48 min |
+
+  Direct PPO seeds 1–2 at 28.8k / 120k steps at 08:14 UTC (≈ 24 % in 77 min → done ≈ 12:15 UTC).
+- Direct PPO seeds 1–2 finished 11:31 / 11:33 UTC (≈ 4.6 h each; 1216 / 1212 SUMO episodes). Manifest rebuilt for
+  seeds 0–2 (seed-0 evaluations reused as intended); final evaluation of the 13 new points started 11:34 UTC
+  (≈ 285 s per point on test with 6 workers → ≈ 1.5 h incl. OOD).
+- Early signal (12:17 UTC): seed 1's selected Surrogate-PPO (round 3, best V −42.6) has test TTS **46.5** veh h,
+  1 breakdown and 5 catastrophic episodes in 90 (seed 0: 41.3, none); PI-ALINEA 47.3, seed-0 SUMO-PPO 46.6. The
+  validation score did not predict test TTS for this seed; the three-seed margin over PI-ALINEA will be smaller than
+  seed 0's 12.7 %.
+- Test set complete (12:43 UTC), test TTS (veh h) of the selected policies:
+
+  | arm | seed 0 | seed 1 | seed 2 | mean |
+  |---|---|---|---|---|
+  | Surrogate-PPO | 41.3 | 46.5 (r3; 1 bd, 5 cat.) | 44.4 (r4; 6 bd, 3 cat.) | ≈ 44.1 |
+  | SUMO-PPO (1000 EE) | 46.6 | 62.2 (10 cat.) | 65.8 (12 cat.) | ≈ 58.2 |
+  | PI-ALINEA / ALINEA | 47.3 / 51.4 | same | same | |
+
+  Direct PPO is far more seed-sensitive than Surrogate-PPO: seeds 1–2 are worse than pure ALINEA. Rough three-seed
+  margins: Surrogate-PPO ≈ 7 % below PI-ALINEA, ≈ 24 % below SUMO-PPO (tables pending, with seed-level CIs).
+
+## 8. Results over policy seeds 0–2 (60 km/h ramp, 2026-09-24)
+Sweep finished 13:19 UTC (`runs/study/m14/tables/tables.md`, per-seed tables in `tables/seed_<s>/`, seed-0-only copy
+in `tables_seed0_only/`). Mean ± sd over seeds; baselines are seed-independent.
+
+| method | ID TTS | ID max q | OOD TTS | OOD max q | SUMO episodes | compute h |
+|---|---|---|---|---|---|---|
+| ALINEA | 51.39 | 54.7 | 56.49 | 54.2 | 666 | 3.8 |
+| PI-ALINEA | 47.34 | 47.2 | 53.19 | 52.6 | 882 | 4.9 |
+| SUMO-PPO | 58.19 ± 10.22 | 61.0 ± 17.1 | 69.36 ± 15.42 | 62.2 ± 13.0 | 1215 ± 2 | 5.4 ± 0.1 |
+| **Surrogate-PPO** | **44.10 ± 2.61** | **38.2 ± 6.3** | **49.82 ± 2.23** | **41.1 ± 1.9** | 944 ± 31 | 6.8 ± 1.2 |
+| Surrogate-MPC | 85.91 | 13.4 | 91.48 | 20.2 | 962 | 5.7 |
+
+Per seed (ID / OOD TTS): Surrogate-PPO 41.34 / 50.17, 46.55 / 51.86, 44.40 / 47.44; SUMO-PPO 46.57 / 51.55,
+62.19 / 78.20, 65.79 / 78.33. Table I is unchanged across seeds (test density rel-L2 18.18 ± 0.15 %, outflow
+4.99 ± 0.01 %, return 4.71 ± 0.23 %).
+
+Headline reductions of Surrogate-PPO over all seeds (95 % CI, hierarchical bootstrap over seeds then episodes):
+
+| vs | test (seed 0 alone) | test, 3 seeds | OOD (seed 0 alone) | OOD, 3 seeds |
+|---|---|---|---|---|
+| PI-ALINEA | 12.7 [8.7, 16.1] | **6.8 [0.6, 12.8]** (12.7 / 1.7 / 6.2) | 5.7 [−1.8, 11.6] | **6.3 [0.5, 11.2]** (5.7 / 2.5 / 10.8) |
+| ALINEA | 19.6 [15.5, 23.2] | 14.2 [8.4, 19.6] | 11.2 [2.4, 18.4] | 11.8 [5.5, 17.1] |
+| SUMO-PPO | 11.2 [7.6, 14.3] | **24.2 [11.8, 32.7]** (11.2 / 25.2 / 32.5) | 2.7 [−6.0, 9.4] | **28.2 [4.0, 39.9]** (2.7 / 33.7 / 39.4) |
+
+Reading:
+- Seed 0 was Surrogate-PPO's best seed and SUMO-PPO's best seed. Over three seeds Surrogate-PPO still beats
+  PI-ALINEA in every seed on both sets, but by 6.8 % (ID) / 6.3 % (OOD), both CIs just above 0; the OOD margin is now
+  significant (seed 0 alone was not).
+- Direct SUMO-PPO at ~1200 episodes is strongly seed-dependent (ID 46.6 / 62.2 / 65.8; seeds 1–2 worse than pure
+  ALINEA, 10–12 catastrophic test episodes). Surrogate-PPO's seed spread is 4× smaller (sd 2.6 vs 10.2 ID). The
+  robust claim for the paper: at a comparable (slightly smaller) SUMO budget, surrogate training is much more
+  reliable than direct training (−24 % / −28 % TTS), and it beats a tuned PI-ALINEA modestly but consistently.
+- Surrogate-PPO keeps the smallest ramp queues of the working controllers (max queue 38 vs 47 for PI-ALINEA ID).
+- Validation selection is imperfect: seed 1 had the best validation score (−42.6) but the worst test TTS (46.5,
+  1 breakdown, 5 catastrophic episodes); seed 2 has 6/90 breakdowns. Worth a per-profile look.
+- Compute: seeds 1–2 ran with the incremental GRU (loops 48–58 min); the 6.8 ± 1.2 h mean mixes code versions, so
+  report per-seed or re-measure seed 0 before quoting compute. Timing check (per-seed tables, `study.json`,
+  `rounds.json` fields `ppo_wall_s` / `wall_s`):
+
+  | | seed 0 (old code) | seed 1 | seed 2 |
+  |---|---|---|---|
+  | rounds run / selected | 5 / r5 | 5 / r3 | 4 / r4 |
+  | PPO per round (s) | 1550–2080 | 340–458 | 367–433 |
+  | PPO total | 2.43 h | 32.6 min | 26.4 min |
+  | loop wall (PPO + SUMO val + fine-tune) | 2.7 h | 58.1 min | 48.2 min |
+  | non-PPO per round (s) | ≈ 185 | 262–370 | 288–394 |
+  | Surrogate-PPO charged compute | 8.1 h | 6.3 h | 5.9 h |
+  | SUMO-PPO charged compute / wall | 5.5 h / ≈ 5 h | 5.4 h / 4.6 h | 5.4 h / 4.6 h |
+
+  With the fast code the surrogate charge is ≈ 4.0 h fixed (692 initial episodes ≈ 3.2 h + round-0 ensemble
+  0.8 h) + ≈ 54 SUMO episodes and ≈ 11–13 min per round. The remaining 0.5–0.9 h gap to direct PPO is about the
+  round-0 ensemble training; SUMO time alone is lower for Surrogate-PPO (908–962 vs ≈ 1215 episodes). Non-PPO time
+  per round rose vs seed 0 because four processes shared the runtime (6 SUMO workers per branch vs 12). Elapsed
+  time favours Surrogate-PPO (≈ 27 min E0/data/ensemble + ≈ 1 h loop vs 4.6 h direct PPO), but only because its
+  SUMO data is collected in parallel while direct PPO runs one simulation at a time. Sweep wall: 06:57 → 13:19 UTC
+  (6.4 h; direct PPO 4.6 h was the long pole, evaluation 1.75 h).
+- Table fix after the run: identical-seed rows printed "± 0.00" from float noise; `_pm` now treats sd below 1e-9 of
+  the mean as zero (rebuild the tables to clean the file; values unchanged).
+
+## 9. Direct SUMO-PPO trained longer: 1000 → 1200 episodes (setup, 2026-09-24)
+Goal: give direct PPO at least Surrogate-PPO's compute (fast code 5.9–6.3 h) so the comparison cannot be read as
+"direct PPO needed more time". 1200 training episodes = 1200 + 15 × 18 validation = 1470 SUMO episodes ≈ 6.6 h
+summed compute (1000 episodes: 1216 ≈ 5.4 h).
+- `run.py extend-direct --seeds 0 1 2 --from-budget 1000 --to-budget 1200`: copies each finished run to
+  `direct_ppo_1200ee_s<seed>` with its final model as the latest checkpoint (step 120000), its validation history
+  and its ledger (`m14_direct_1200_s<seed>`), then `sumo-ppo --budgets 1200` resumes it to 144000 steps; the three
+  seeds run concurrently; then evaluate/tables/report with budgets 1000 and 1200. Same-seed continuation with a
+  constant learning rate and kept optimizer state is the same run trained longer; checkpoint selection covers
+  steps 0–144k, so the 1200 run may keep a ≤ 120k checkpoint if later ones do not validate better.
+- Fix in `train_ppo`: a resumed session's callbacks count steps from the restored step count, so checkpoints and
+  evaluations stay on the `eval_freq` grid (120000 is off the 9600 grid; before the fix the evaluations would have
+  come at 129.6k and 139.2k and none at 144k). Earlier resumes started from on-grid checkpoints and were unaffected.
+- Tables: SUMO-PPO = largest budget; each smaller budget gets a `SUMO-PPO (<n> ep.)` row and its own headline
+  reductions.
+- Checks: local SUMO run 360 steps (eval every 240) then continued from the final model to 720 steps: checkpoints
+  240/360/480/720, evaluations 240/480/720, ledger 6 training + 3 validation episodes, nothing lost. New tests
+  (CLI dry run, run copy, multi-budget table); m14 suite 91 passed.
+- Colab: `colab/m14_direct_extend.ipynb` (keeps the current tables in `tables_direct1000/`). Expected ≈ 1 h
+  training + 15–20 min evaluation.
 
 ## Open
-- Explanation of the Surrogate-MPC negative result; seeds 1–2; paper edits (60 km/h numbers, Eq. 4 Q_{k+1},
-  Theorem 1, cost column).
-- OOD gap: per-profile look at where Surrogate-PPO loses its OOD margin at 60 km/h (seeds 1–2 will also narrow the CI).
-- Commit the notebook watchdog cell (6b, `colab/m14_ramp60.ipynb`) and this progress file.
-- Download the results archive (cell 9) and copy the key files into the local repo.
+- Direct PPO at 1200 episodes (§9): run `colab/m14_direct_extend.ipynb`, then compare 1000 vs 1200 per seed.
+- Paper edits with the three-seed numbers (§8): Table II as mean ± sd, headline vs PI-ALINEA 6.8 % / 6.3 %, the
+  reliability argument vs direct PPO; 60 km/h setting, Eq. 4 Q_{k+1}, Theorem 1, cost column (report per seed or
+  re-measure seed-0 compute with the fast code).
+- Explanation of the Surrogate-MPC negative result.
+- Per-profile look: seed 1's selected policy (validation-best, test-worst) and seed 2's 6/90 breakdowns; whether a
+  different selection rule (e.g. worst-case or p10 on validation) would have picked better rounds.
+- Download the seeds results archive (m14_seeds.ipynb cell 8) and copy the key files into the local repo; rebuild
+  the tables once with the `_pm` fix to drop the "± 0.00" artefacts.

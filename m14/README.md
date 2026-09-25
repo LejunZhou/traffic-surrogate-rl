@@ -81,6 +81,8 @@ direct PPO run continues from its latest checkpoint. On Google Colab use
 More policy seeds on a finished seed-0 study: `python run.py seeds --new-seeds 1 2 --torch-threads 4`
 trains each new seed's surrogate-PPO and direct PPO concurrently (shared data, ensemble and baselines),
 then evaluates and tabulates all seeds (mean ± sd, seed-level CIs; Colab: `../colab/m14_seeds.ipynb`).
+To give direct PPO more compute, `python run.py extend-direct --to-budget 1200` continues every seed's finished
+1000-episode run to 1200 episodes and tabulates both budgets (Colab: `../colab/m14_direct_extend.ipynb`).
 Use a fresh copy for experiments with changed configurations so outputs do not
 mix settings. [Workflow details](docs/workflow.md) cover custom commands and outputs.
 

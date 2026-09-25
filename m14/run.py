@@ -362,6 +362,67 @@ def seeds(args) -> None:
         stage(args)
 
 
+def _continue_direct_run(seed: int, source_budget: int, budget: int, dry: bool) -> None:
+    """Start direct_ppo_<budget>ee_s<seed> as a copy of the finished <source_budget> run: its final model
+    (policy, value net, optimizer, step count) becomes the checkpoint `sumo-ppo` resumes from, and the
+    evaluation history and SUMO ledger come along, so the longer run is charged for all of its episodes
+    and its checkpoint selection sees every evaluation since step 0."""
+    import zipfile
+
+    source, target = ROOT / f"{STUDY}/direct_ppo_{source_budget}ee_s{seed}", ROOT / f"{STUDY}/direct_ppo_{budget}ee_s{seed}"
+    ledger_dir = ROOT / "runs/ledger"
+    source_ledger = ledger_dir / f"m14_direct_{source_budget}_s{seed}.jsonl"
+    target_ledger = ledger_dir / f"m14_direct_{budget}_s{seed}.jsonl"
+    if dry:
+        print(f"$ copy {source.relative_to(ROOT)} -> {target.relative_to(ROOT)} (final_model.zip as its latest "
+              f"checkpoint) and {source_ledger.relative_to(ROOT)} -> {target_ledger.name}", flush=True)
+        return
+    if target.exists():
+        print(f"{target.relative_to(ROOT)} exists: continuing it as it is", flush=True)
+        return
+    if not (source / "final_model.zip").exists():
+        raise RuntimeError(f"{source.relative_to(ROOT)}/final_model.zip missing: finish the "
+                           f"{source_budget}-episode run first (python run.py sumo-ppo --seed {seed} --budgets {source_budget})")
+    with zipfile.ZipFile(source / "final_model.zip") as z:
+        steps = int(json.loads(z.read("data"))["num_timesteps"])
+    staging = target.with_name(target.name + ".partial")      # a copy cut off by a lost session is redone
+    shutil.rmtree(staging, ignore_errors=True)
+    shutil.copytree(source, staging, ignore=shutil.ignore_patterns("final_model.zip", "best_model_selected.zip",
+                                                                   "selection.json"))
+    shutil.copyfile(source / "final_model.zip", staging / "checkpoints" / f"ppo_sumo_{steps}_steps.zip")
+    rows = [json.loads(line) for line in source_ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
+    target_ledger.write_text("".join(json.dumps({**r, "study": f"m14_direct_{budget}_s{seed}"}) + "\n" for r in rows),
+                             encoding="utf-8")
+    (staging / "continued_from.json").write_text(json.dumps(
+        {"source": str(source.relative_to(ROOT)), "steps": steps, "ledger_rows": len(rows),
+         "time": datetime.now(timezone.utc).isoformat()}, indent=1))
+    staging.rename(target)
+    print(f"{target.relative_to(ROOT)}: continues {source.name} from step {steps} ({len(rows)} ledger rows)", flush=True)
+
+
+def extend_direct(args) -> None:
+    """Continue the finished direct SUMO-PPO runs of every seed to a larger episode budget (same seed, same
+    optimizer state, constant learning rate: equivalent to having trained longer), then evaluate and tabulate
+    both budgets. Table II's SUMO-PPO row becomes the larger budget; the smaller one gets its own row."""
+    require(f"{STUDY}/alinea_tuning.json", args.dry_run, "Run: python run.py baselines")
+    if args.to_budget <= args.from_budget:
+        raise ValueError("--to-budget must be larger than --from-budget")
+    if args.recover_interrupted:
+        os.environ["M14_RECOVER_INTERRUPTED"] = "1"      # inherited by every stage and child process
+    args.seeds = list(dict.fromkeys(args.seeds))
+    for s in args.seeds:
+        _continue_direct_run(s, args.from_budget, args.to_budget, args.dry_run)
+    args.budgets = [args.to_budget]
+    if args.dry_run:
+        for s in args.seeds:
+            sumo_ppo(argparse.Namespace(**{**vars(args), "seed": s}))
+    else:
+        _run_branches({f"direct_s{s}": [("sumo-ppo", s)] for s in args.seeds}, args)
+    args.budgets = [args.from_budget, args.to_budget]
+    for stage in (evaluate, tables, report):
+        stage(args)
+
+
 def smoke(args) -> None:
     """Exercise the full path in a disposable copy, without touching study outputs."""
     if args.dry_run:
@@ -477,6 +538,7 @@ def parser() -> argparse.ArgumentParser:
                     "report": "plot held-out returns against simulation cost",
                     "pipeline": "run the complete M14 study (hours of computation)",
                     "seeds": "train more policy seeds on the finished seed-0 study in parallel, then evaluate and tabulate all seeds",
+                    "extend-direct": "continue the finished direct SUMO-PPO runs to a larger episode budget, then evaluate and tabulate",
                     "smoke": "test the end-to-end workflow in a separate temporary project"}
     for name, description in descriptions.items():
         p = sub.add_parser(name, help=description, parents=[common])
@@ -491,11 +553,15 @@ def parser() -> argparse.ArgumentParser:
             p.add_argument("--steps", type=positive_int, default=300000, help="surrogate PPO steps per round")
         if name in ("sumo-ppo", "evaluate", "pipeline", "seeds"):
             p.add_argument("--budgets", type=positive_int, nargs="+", default=[1000], help="direct PPO training budgets in episodes")
-        if name in ("evaluate", "tables", "pipeline", "seeds"):
+        if name == "extend-direct":
+            p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2], help="policy seeds to continue (default: 0 1 2)")
+            p.add_argument("--from-budget", type=positive_int, default=1000, help="finished direct PPO budget, episodes")
+            p.add_argument("--to-budget", type=positive_int, default=1200, help="budget to continue to, episodes")
+        if name in ("evaluate", "tables", "pipeline", "seeds", "extend-direct"):
             if name in ("evaluate", "tables"):
                 p.add_argument("--seeds", type=int, nargs="+", default=[0], help="trained policy seeds to include")
             p.add_argument("--sets", choices=["test", "ood", "val"], nargs="+", default=["test", "ood"])
-        if name in ("evaluate", "pipeline", "seeds"):
+        if name in ("evaluate", "pipeline", "seeds", "extend-direct"):
             p.add_argument("--mpc", action=argparse.BooleanOptionalAction, default=True,
                            help="evaluate Surrogate-MPC on the last aggregation ensemble (default: on)")
             p.add_argument("--mpc-args", default="iters=30", help="MPC options appended to the spec, e.g. H=20,iters=30")
@@ -504,7 +570,7 @@ def parser() -> argparse.ArgumentParser:
             p.add_argument("--rhos", type=float, nargs="+", default=None, help="ALINEA target densities, veh/km")
             p.add_argument("--kis", type=float, nargs="+", default=None, help="ALINEA integral gains")
             p.add_argument("--kps", type=float, nargs="+", default=None, help="PI-ALINEA proportional gains")
-        if name == "seeds":
+        if name in ("seeds", "extend-direct"):
             p.add_argument("--recover-interrupted", action="store_true",
                            help="rerun work cut off by a lost session (see pipeline --recover-interrupted)")
         if name == "pipeline":
@@ -527,7 +593,7 @@ def main() -> None:
     os.environ.update(runtime_env())
     commands = {"simulate": simulate, "e0": e0, "data": data, "deeponet": deeponet, "surrogate-ppo": surrogate_ppo,
                 "sumo-ppo": sumo_ppo, "baselines": baselines, "evaluate": evaluate, "tables": tables, "report": report,
-                "pipeline": pipeline, "seeds": seeds, "smoke": smoke}
+                "pipeline": pipeline, "seeds": seeds, "extend-direct": extend_direct, "smoke": smoke}
     try:
         if args.command == "check":
             check_environment()

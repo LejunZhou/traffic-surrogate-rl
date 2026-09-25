@@ -326,6 +326,11 @@ def train(config: dict) -> None:
             load_kwargs = {k: v for k, v in ppo_kwargs.items() if k != "policy_kwargs"}
             model = PPO.load(str(resume_ckpt), env=env, seed=seed + resumed_steps, tensorboard_log=None, **load_kwargs)
             print(f"[train_ppo] resumed from {resume_ckpt.name}: {model.num_timesteps} of {total_timesteps} steps done")
+            # SB3 callbacks count env steps from 0 in every session: start them at the restored step count so
+            # checkpoints and evaluations stay on the eval_freq grid (a run continued from its final model is
+            # usually off that grid)
+            for callback in callbacks:
+                callback.n_calls = resumed_steps // n_envs
         elif init_policy:
             init_path = _resolve_path(init_policy, project_root)
             load_kwargs = {k: v for k, v in ppo_kwargs.items() if k != "policy_kwargs"}

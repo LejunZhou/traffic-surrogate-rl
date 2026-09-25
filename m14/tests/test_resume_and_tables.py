@@ -175,3 +175,29 @@ def test_seed_summary_and_hierarchical_reduction():
     assert 10.0 - 1e-9 <= lo < 20.0 < hi <= 30.0 + 1e-9               # seed resampling spans the per-seed spread
     with pytest.raises(ValueError):
         seed_reduction([np.empty((0, 2))])
+
+
+def test_table2_adds_a_row_per_smaller_direct_budget(tmp_path):
+    from build_paper_tables import headline, table2
+
+    def episodes(name, tts):
+        path = tmp_path / f"{name}.jsonl"
+        path.write_text("".join(json.dumps({"profile_set": "test", "profile_index": i, "sumo_seed": 100, "tts_veh_h": tts,
+                                            "episode_queue_mean": 1.0, "episode_queue_max": 2.0, "served_veh": 3.0,
+                                            "breakdown": False}) + "\n" for i in range(4)))
+        return str(path)
+
+    def point(name, tts, **extra):
+        return {"policy": name, "seed": 0, "ee": 100, "accounted_runtime_s": 3600.0, "test": episodes(name, tts), **extra}
+
+    manifest = {"arms": [
+        {"name": "PI-ALINEA", "points": [point("pi", 10.0)]},
+        {"name": "B direct SUMO PPO", "points": [point("b1000", 12.0, nominal_ee=1000, budget_selected=False),
+                                                 point("b1200", 11.0, nominal_ee=1200, budget_selected=True)]},
+        {"name": "A1 aggregation", "points": [point("a1", 8.0, round=1, validation_selected=True)]}]}
+    t2, rows = table2(manifest, 0, ("test",))
+    assert list(t2["rows"]) == ["PI-ALINEA", "SUMO-PPO", "SUMO-PPO (1000 ep.)", "Surrogate-PPO"]
+    assert t2["rows"]["SUMO-PPO"]["test"]["tts"] == 11.0 and t2["rows"]["SUMO-PPO (1000 ep.)"]["test"]["tts"] == 12.0
+    head = headline(rows, ("test",))
+    assert head["Surrogate-PPO vs SUMO-PPO (test)"]["reduction_pct"] == pytest.approx(100 * (1 - 8 / 11))
+    assert head["Surrogate-PPO vs SUMO-PPO (1000 ep.) (test)"]["reduction_pct"] == pytest.approx(100 * (1 - 8 / 12))

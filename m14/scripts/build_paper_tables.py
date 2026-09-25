@@ -11,7 +11,8 @@ Table II  per controller on ID (test) and OOD: full-episode TTS (tts_veh_h), mea
           (manifest accounted_runtime_s: SUMO episode wall times from the ledgers, DeepONet member
           training, surrogate PPO process time; direct PPO's gradient updates are not included).
           Surrogate-PPO is charged the whole aggregation loop (every round run), not only the rounds
-          up to the selected one. Final ID/OOD evaluation is never charged.
+          up to the selected one. Final ID/OOD evaluation is never charged. With several direct PPO
+          budgets, SUMO-PPO is the largest and each smaller one gets a "SUMO-PPO (<n> ep.)" row.
 Headline  relative TTS reduction 1 - mean(TTS_a) / mean(TTS_b), paired over identical
           (profile, SUMO seed) episodes, 95 % bootstrap CI.
 Seeds     with --seeds s1 s2 ..., each policy seed's tables go to <out>/seed_<s>/ and <out>/tables.md
@@ -136,14 +137,26 @@ def table1(ensemble: Path) -> dict:
     return out
 
 
+def _other_budgets(arm: dict, seed: int) -> list[dict]:
+    """Direct SUMO-PPO points of this seed at budgets below the selected (largest) one, smallest first."""
+    points = [p for p in arm["points"] if int(p.get("seed", 0)) == seed and not p.get("budget_selected")]
+    return sorted(points, key=lambda p: p["nominal_ee"])
+
+
 def table2(manifest: dict, seed: int, sets: tuple[str, ...]) -> dict:
+    """Rows of TABLE2_ROWS; a direct SUMO-PPO arm with several budgets adds a "SUMO-PPO (<n> ep.)" row per
+    smaller budget after the SUMO-PPO row (the largest budget)."""
     arms = {arm["name"]: arm for arm in manifest["arms"]}
-    out, episode_rows = {}, {}
+    todo = []
     for label, name, how in TABLE2_ROWS:
         if name not in arms:
             print(f"[tables] {label}: arm {name!r} not in the manifest, skipped")
             continue
-        point = select_point(arms[name], how, seed)
+        todo.append((label, name, select_point(arms[name], how, seed)))
+        if how == "budget_selected":
+            todo += [(f"{label} ({p['nominal_ee']} ep.)", name, p) for p in _other_budgets(arms[name], seed)]
+    out, episode_rows = {}, {}
+    for label, name, point in todo:
         row = {"arm": name, "policy": point["policy"]}
         for set_name in sets:
             path = _path(point[set_name])
@@ -162,9 +175,14 @@ def table2(manifest: dict, seed: int, sets: tuple[str, ...]) -> dict:
     return {"rows": out}, episode_rows
 
 
+def _references(labels) -> list[str]:
+    """Headline comparison baselines: the tuned feedback controllers and every direct SUMO-PPO budget."""
+    return ["PI-ALINEA", "ALINEA", *dict.fromkeys(l for l in labels if l.startswith("SUMO-PPO"))]
+
+
 def headline(episode_rows: dict, sets: tuple[str, ...]) -> dict:
     out = {}
-    for ref in ("PI-ALINEA", "ALINEA", "SUMO-PPO"):
+    for ref in _references(label for label, _ in episode_rows):
         for set_name in sets:
             a, b = episode_rows.get(("Surrogate-PPO", set_name)), episode_rows.get((ref, set_name))
             if a and b:
@@ -249,7 +267,7 @@ def seed_summary(per_seed: dict, sets: tuple[str, ...]) -> dict:
         for split in ("val", "test"):
             t1[split]["n"] = [t["splits"][split]["n"] for t in t1s]
     rows = {}
-    for label, _, _ in TABLE2_ROWS:
+    for label in per_seed[seeds[0]][1]["rows"]:
         if not all(label in per_seed[s][1]["rows"] for s in seeds):
             continue
         seed_rows = [per_seed[s][1]["rows"][label] for s in seeds]
@@ -260,7 +278,7 @@ def seed_summary(per_seed: dict, sets: tuple[str, ...]) -> dict:
                            for m in ("tts", "mean_queue", "max_queue", "completed_trips", "breakdown_rate")}
         rows[label] = r
     head = {}
-    for ref in ("PI-ALINEA", "ALINEA", "SUMO-PPO"):
+    for ref in _references(rows):
         for set_name in sets:
             a, b = ("Surrogate-PPO", set_name), (ref, set_name)
             if all(a in per_seed[s][2] and b in per_seed[s][2] for s in seeds):
@@ -270,7 +288,8 @@ def seed_summary(per_seed: dict, sets: tuple[str, ...]) -> dict:
 
 
 def _pm(x: dict, fmt: str = ".2f", sep: str = " ± ") -> str:
-    return f"{x['mean']:{fmt}}" + (f"{sep}{x['sd']:{fmt}}" if x["sd"] > 0 else "")
+    varies = x["sd"] > 1e-9 * max(1.0, abs(x["mean"]))      # identical seeds give float-noise sd, not a spread
+    return f"{x['mean']:{fmt}}" + (f"{sep}{x['sd']:{fmt}}" if varies else "")
 
 
 def _markdown_seeds(summary: dict, sets: tuple[str, ...]) -> str:
@@ -296,7 +315,7 @@ def _markdown_seeds(summary: dict, sets: tuple[str, ...]) -> str:
     lines += ["", "TTS in veh h; queues in vehicles (1-s samples); compute = summed compute hours.", "",
               "### TTS per seed (veh h)", "", f"| Method | {header} |", "|---|" + "---|" * (len(sets) * len(seeds))]
     for label, r in summary["table2"].items():
-        if any(r[s]["tts"]["sd"] > 0 for s in sets):
+        if any(r[s]["tts"]["sd"] > 1e-9 * max(1.0, abs(r[s]["tts"]["mean"])) for s in sets):
             lines.append(f"| {label} | " + " | ".join(f"{v:.2f}" for s in sets for v in r[s]["tts"]["per_seed"]) + " |")
     lines += ["", "## Headline TTS reductions over all seeds", "",
               "95 % CI: hierarchical bootstrap (policy seeds, then episodes within seeds).", ""]

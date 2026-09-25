@@ -33,6 +33,12 @@ Tables I and II. The whole study runs on Colab: the local Windows machine lost t
 
 7. (2026-09-23, after seed 0) Incremental GRU branch in the surrogate environment (same outputs, ≈ 5–8× faster
    surrogate PPO) and a CPU thread cap for PPO processes (`run.py --torch-threads`), so seeds 1–2 can run in parallel.
+8. (2026-09-24, after seeds 0–2) Direct PPO at a compute budget at least equal to Surrogate-PPO's: `run.py
+   extend-direct` continues each seed's 1000-episode run to 1200 episodes (≈ 1470 SUMO episodes, ≈ 6.6 h summed
+   compute vs 5.9–6.3 h for Surrogate-PPO with the fast code), tables with both budgets; `colab/m14_direct_extend.ipynb`.
+   Why: with the fast code Surrogate-PPO costs 0.5–0.9 h more compute than direct PPO at 1000 episodes, so a
+   reviewer can ask whether direct PPO simply needed that time. Same-seed continuation (constant learning rate,
+   optimizer state kept) is equivalent to having trained longer and costs ≈ 1 h instead of ≈ 5.5 h for new runs.
 
 ## Verification
 Unit tests (resume bookkeeping, table maths); `run.py smoke` extended with an interrupted-and-resumed direct
