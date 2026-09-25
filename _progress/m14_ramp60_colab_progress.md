@@ -391,13 +391,89 @@ summed compute (1000 episodes: 1216 ≈ 5.4 h).
 - Colab: `colab/m14_direct_extend.ipynb` (keeps the current tables in `tables_direct1000/`). Expected ≈ 1 h
   training + 15–20 min evaluation.
 
+## 10. Results: direct SUMO-PPO at 1200 episodes (2026-09-25)
+Colab run 02:27–04:15 UTC (commit 39bf227): training 02:28–03:33 (three seeds at once, ≈ 7 steps/s each),
+evaluation of the three new policies 03:55–04:15 (all other results reused). Checkpoints and evaluations landed on
+the 9600-step grid (124.8k, 134.4k, 144k), no ledger rows lost. The tables before the run are in
+`tables_direct1000/`.
+
+Checkpoint selection (validation mean return; higher is better):
+
+| seed | 1000-ep. run selected | 1200-ep. run selected |
+|---|---|---|
+| 0 | 86.4k (−48.7) | 144k (−46.7) |
+| 1 | 48k (−64.2) | 144k (−49.9) |
+| 2 | 96k (−67.7) | 96k (−67.7), same policy (later checkpoints −69 to −72) |
+
+Test / OOD TTS (veh h):
+
+| | seed 0 | seed 1 | seed 2 | mean ± sd | SUMO episodes | compute h |
+|---|---|---|---|---|---|---|
+| SUMO-PPO 1000 ep., ID | 46.57 | 62.19 | 65.79 | 58.19 ± 10.22 | 1215 | 5.4 |
+| **SUMO-PPO 1200 ep., ID** | 45.03 | 49.58 | 65.79 | **53.47 ± 10.92** | 1469 | 6.6 |
+| Surrogate-PPO, ID | 41.34 | 46.55 | 44.40 | 44.10 ± 2.61 | 944 | 5.9–8.1 |
+| SUMO-PPO 1000 ep., OOD | 51.55 | 78.20 | 78.33 | 69.36 ± 15.42 | | |
+| **SUMO-PPO 1200 ep., OOD** | 49.71 | 53.89 | 78.33 | **60.64 ± 15.46** | | |
+| Surrogate-PPO, OOD | 50.17 | 51.86 | 47.44 | 49.82 ± 2.23 | | |
+
+PI-ALINEA 47.34 ID / 53.19 OOD. Surrogate-PPO's TTS reduction (hierarchical bootstrap CI):
+
+| vs | test | OOD |
+|---|---|---|
+| SUMO-PPO 1200 ep. | **17.5 % [4.7, 31.9]** (8.2 / 6.1 / 32.5) | **17.8 % [−2.4, 38.8]** (−0.9 / 3.8 / 39.4) |
+| SUMO-PPO 1000 ep. | 24.2 % [11.8, 32.7] | 28.2 % [4.0, 39.9] |
+| PI-ALINEA (unchanged) | 6.8 % [0.6, 12.8] | 6.3 % [0.5, 11.2] |
+
+Per seed, Surrogate-PPO vs SUMO-PPO 1200 ep. (paired bootstrap within the seed; `tables/seed_<s>/tables.md`):
+
+| seed | SUMO-PPO 1200 ID TTS / max q | OOD TTS / max q | SUMO episodes | compute h | test reduction | OOD reduction |
+|---|---|---|---|---|---|---|
+| 0 | 45.03 / 38.8 | 49.71 / 46.3 | 1470 | 6.7 | 8.2 % [4.3, 11.5] | −0.9 % [−10.0, 6.0] |
+| 1 | 49.58 / 49.4 | 53.89 / 53.4 | 1470 | 6.6 | 6.1 % [−1.1, 12.5] | 3.8 % [−4.0, 11.9] |
+| 2 | 65.79 / 72.6 | 78.33 / 63.1 | 1466 | 6.6 | 32.5 % [27.2, 37.4] | 39.4 % [33.8, 43.4] |
+
+### Training time (all runs, Colab L4, 12 CPUs)
+Summed compute = SUMO episode wall times from the ledgers + DeepONet member training + surrogate PPO process time
+(direct PPO's gradient updates are not in its ledger). Elapsed = wall-clock on Colab.
+
+| run | SUMO episodes | summed compute h | elapsed | notes |
+|---|---|---|---|---|
+| Surrogate-PPO seed 0 (old GRU code) | 962 | 8.1 | ≈ 3.1 h (E0/data/ensemble 27 min + loop 2.7 h) | PPO 26–35 min per round |
+| Surrogate-PPO seed 1 (fast code) | 962 (selected r3: 854) | 6.3 | loop 58 min (+ shared 27 min) | PPO 5.7–7.6 min per round |
+| Surrogate-PPO seed 2 (fast code) | 908 | 5.9 | loop 48 min (+ shared 27 min) | PPO 6.1–7.2 min per round |
+| SUMO-PPO 1000 ep., seed 0 | 1216 | 5.5 | ≈ 5 h (one simulation at a time) | |
+| SUMO-PPO 1000 ep., seeds 1, 2 | 1216 / 1212 | 5.4 / 5.4 | 4.6 h each (concurrent with the loops) | ≈ 7 steps/s |
+| SUMO-PPO 1200 ep., seeds 0/1/2 | 1470 / 1470 / 1466 | 6.7 / 6.6 / 6.6 | continuation 65 min (02:28–03:33, three seeds at once) | +254 episodes each |
+| ALINEA / PI-ALINEA tuning | 666 / 882 | 3.8 / 4.9 | | seed-independent |
+
+- Surrogate-PPO with the fast code (5.9–6.3 h) costs about as much compute as direct PPO at 1000 episodes (5.4 h)
+  and less than the compute-matched 1200-episode run (6.6 h), while using 35–38 % fewer SUMO episodes.
+- The 1000 → 1200 continuation took 65 min elapsed (≈ 13.5 s per SUMO episode incl. PPO updates) plus 20 min of
+  final evaluation (03:55–04:15; all older results reused after re-hashing, ≈ 20 min 03:33–03:55). A fresh 1200-episode
+  run would have taken ≈ 5.5 h.
+
+Reading:
+- More training helps direct PPO: seed 1 recovered (ID 62.2 → 49.6, OOD 78.2 → 53.9), seed 0 improved a little,
+  seed 2 found nothing better than its 96k checkpoint. Seeds 0 and 1 selected their last checkpoint, so direct
+  PPO is not converged at 1200 episodes; a still longer budget could narrow the gap further.
+- With more compute (6.6 h vs 5.9–6.3 h fast-code Surrogate-PPO) and 1.55× the SUMO episodes, direct PPO is still
+  worse on average than both Surrogate-PPO and PI-ALINEA (only seed 0 beats PI-ALINEA, ID 45.0 < 47.3).
+- Surrogate-PPO vs compute-matched direct PPO: significant on test (17.5 % [4.7, 31.9]); on OOD the mean is 17.8 %
+  but the CI includes 0, and seed 0 is a tie (−0.9 %). Much of the average gap comes from seed 2's failed direct
+  run. The robust statements: Surrogate-PPO is better on test at equal compute with ≈ 35 % fewer SUMO episodes,
+  and it is far more reliable across seeds (sd 2.6 vs 10.9 ID, 2.2 vs 15.5 OOD).
+- For the paper: report SUMO-PPO at 1200 episodes as the compute-matched baseline (with the 1000-episode row or a
+  sentence), and phrase the OOD comparison with direct PPO as not significant.
+
 ## Open
-- Direct PPO at 1200 episodes (§9): run `colab/m14_direct_extend.ipynb`, then compare 1000 vs 1200 per seed.
 - Paper edits with the three-seed numbers (§8): Table II as mean ± sd, headline vs PI-ALINEA 6.8 % / 6.3 %, the
   reliability argument vs direct PPO; 60 km/h setting, Eq. 4 Q_{k+1}, Theorem 1, cost column (report per seed or
-  re-measure seed-0 compute with the fast code).
+  re-measure seed-0 compute with the fast code). Direct-PPO baseline = 1200 episodes (§10: vs Surrogate-PPO
+  17.5 % test, OOD n.s.), 1000-episode row as a supplement.
+- Optionally: direct PPO still improving at 1200 episodes (seeds 0, 1 selected their last checkpoint); a longer
+  continuation (e.g. 1500) would show where it saturates, at ≈ 1.2 h Colab per +300 episodes.
 - Explanation of the Surrogate-MPC negative result.
 - Per-profile look: seed 1's selected policy (validation-best, test-worst) and seed 2's 6/90 breakdowns; whether a
   different selection rule (e.g. worst-case or p10 on validation) would have picked better rounds.
-- Download the seeds results archive (m14_seeds.ipynb cell 8) and copy the key files into the local repo; rebuild
+- Download the results archives (m14_seeds.ipynb and m14_direct_extend.ipynb cell 8) and copy the key files into the local repo; rebuild
   the tables once with the `_pm` fix to drop the "± 0.00" artefacts.
