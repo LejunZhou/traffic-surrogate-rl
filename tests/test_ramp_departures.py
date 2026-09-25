@@ -70,6 +70,9 @@ class DelayedTraCI:
     def getPendingVehicles(self):
         return sorted(self.pending)
 
+    def getArrivedNumber(self):
+        return 1
+
     def getStartingTeleportNumber(self):
         return 0
 
@@ -180,3 +183,70 @@ def test_npz_writers_save_confirmed_entries(monkeypatch, config, tmp_path, write
         assert data["ramp_flow_measurement"].item() == "confirmed_departures"
         assert data["ramp_model"].item() == "metered_queue"
         assert data["ramp_ref_vph"].item() == 3600
+
+
+def test_time_varying_ramp_arrivals_and_saved_mainline_labels(monkeypatch, config):
+    install_delayed_sumo(monkeypatch)
+    config["demand"].update(mainline_demand_profile=[1500, 2000, 1800, 2100],
+                            ramp_demand_profile=[0, 900, 1800, 900])
+    data = runner.run_simulation("net", "routes", "detectors", np.zeros(4), config)
+    np.testing.assert_array_equal(data["ramp_queue"], [0, 1, 3, 4])
+    np.testing.assert_array_equal(data["ramp_demand"], [0, 900, 1800, 900])
+    np.testing.assert_array_equal(data["mainline_demand"], [1500, 2000, 1800, 2100])
+    assert data["ramp_departed_count"].sum() == 0
+
+
+def test_true_warmup_is_not_in_recorded_arrays(monkeypatch, config):
+    config["simulation"].update(duration_s=8, warmup_s=4, warmup_ramp_control=0.5)
+    fake = DelayedTraCI({"ramp_0": 4})
+    monkeypatch.setattr(runner, "traci", fake)
+
+    data = runner.run_simulation(
+        "net", "routes", "detectors", np.zeros(2, dtype=np.float32), config
+    )
+
+    assert fake.time == 12  # four discarded seconds plus the eight-second horizon
+    np.testing.assert_array_equal(data["t_grid"], [0, 4])
+    assert data["density"].shape == (19, 2)
+    np.testing.assert_array_equal(data["ramp_departed_count"], [0, 0])
+    assert data["metadata"]["warmup_ramp_departed_total"] == 1
+    assert data["metadata"]["warmup_s"] == 4
+    assert data["metadata"]["warmup_ramp_control"] == 0.5
+    assert data["metadata"]["warmup_mainline_demand_vph"] == 2000
+    assert data["metadata"]["warmup_ramp_demand_vph"] == 900
+
+
+
+def test_fixed_dataset_append_preserves_profiles_and_controls(monkeypatch, config, tmp_path):
+    """Splitting generation across invocations must preserve sampled inputs."""
+    from sumo_env import dataset_generation as generator
+
+    def simulate(*args, **kwargs):
+        install_delayed_sumo(monkeypatch)
+        return runner.run_simulation(*args, **kwargs)
+
+    monkeypatch.setattr(generator, 'run_simulation', simulate)
+    base = tmp_path / 'scenario.yaml'
+    base.write_text(yaml.safe_dump(config))
+    monkeypatch.setattr(generator, 'build_network', lambda *a: {'net': 'net'})
+    monkeypatch.setattr(generator, 'build_detector_file', lambda *a: None)
+    cfg = yaml.safe_load((ROOT / 'configs/experiments/dataset_time_varying.yaml').read_text())
+    cfg['base_sumo_config'] = str(base)
+    cfg['dataset'].update(n_samples=2, warmup_s=4)
+    cfg['dataset']['demand_profile_family']['segments'] = [
+        {'start_min': 0, 'end_min': 16/60, 'mainline_vph': [1250, 1800], 'ramp_vph': [250, 900]}
+    ]
+    cfg['output'].update(raw_dir=str(tmp_path/'full'), network_dir=str(tmp_path), save_heatmaps=False)
+    path = tmp_path/'dataset.yaml'
+    path.write_text(yaml.safe_dump(cfg))
+    install_delayed_sumo(monkeypatch)
+    full = generator.generate_dataset(str(path), ROOT)
+    cfg['dataset'].update(n_samples=1, start_index=1)
+    cfg['output']['raw_dir'] = str(tmp_path/'append')
+    path.write_text(yaml.safe_dump(cfg))
+    install_delayed_sumo(monkeypatch)
+    appended = generator.generate_dataset(str(path), ROOT)
+    with np.load(full[1]) as expected, np.load(appended[0]) as actual:
+        for key in ('mainline_demand', 'ramp_demand', 'ramp_control_cmd', 'seed'):
+            np.testing.assert_array_equal(actual[key], expected[key])
+        assert actual['warmup_s'] == 4

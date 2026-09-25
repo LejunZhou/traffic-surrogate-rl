@@ -171,6 +171,35 @@ python scripts/run_rollout.py \
   --output-index test
 ```
 
+## Fixed one-hour demand dataset (restored local generator)
+
+The canonical loading → overload → recovery schedule is configured in
+[`configs/experiments/dataset_time_varying.yaml`](configs/experiments/dataset_time_varying.yaml).
+It is separate from the M8 random five-minute profile family and the current M14 study.
+The generator samples each linear segment at the start of each 30-second interval,
+then holds that rate constant for the interval. Every eleventh sample (indices 0, 11, …)
+uses the exact schedule; other samples independently scale mainline and ramp demand
+by 0.9–1.1. Four ramp-control families rotate across samples.
+
+From the project root with the SUMO environment activated:
+
+```bash
+bash scripts/make_dataset.sh configs/experiments/dataset_time_varying.yaml
+# One episode, without trying to create train/validation/test splits:
+PYTHONPATH=src python -m sumo_env.dataset_generation --config configs/experiments/dataset_time_varying.yaml --n-samples 1 --no-splits
+# Continue after existing sample indices:
+PYTHONPATH=src python -m sumo_env.dataset_generation --config configs/experiments/dataset_time_varying.yaml --append --n-samples 100
+```
+
+Defaults: 1,000 episodes, a discarded 180-second pre-roll at the initial demands
+and meter setting 0.5, then 120 saved control intervals. Vehicle state and the queue
+carry over from the pre-roll. Outputs go to `data/raw/time_varying/` and 80/10/10
+splits to `data/splits/time_varying/`. Saved arrays include both demand channels,
+commanded control, confirmed ramp inflow, queue, density, and flow; scalar demand
+fields are episode means. The config uses the current `phase1_1.yaml` road and
+vehicle settings; restoring it does not restore the stash's separate scenario,
+surrogate-training, or PPO changes.
+
 ## Phase 1 scope (as built)
 
 - 1-lane mainline + 100 m acceleration lane downstream of the on-ramp, 2000 m total, one on-ramp at 1300 m

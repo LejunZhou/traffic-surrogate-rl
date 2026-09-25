@@ -34,6 +34,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from sumo_env.demand_profiles import scenario_demands
 
 
 def build_network(output_dir: str, config: dict) -> dict[str, str]:
@@ -270,17 +271,18 @@ def _write_routes(path: Path, config: dict, mainline_blocks: list[tuple[float, f
 
     M8: `mainline_blocks` = [(begin_s, end_s, veh/h), ...] writes one
     <flow> element per block (piecewise-constant, time-varying mainline
-    demand from sumo_env.demand_profiles). Without it the single constant
-    flow of demand.mainline_demand_vph is written, as before.
+    demand from sumo_env.demand_profiles). Otherwise use the configured
+    per-control-step demand array (or scalar), including an optional pre-roll.
+    Explicit blocks are absolute SUMO times and are not shifted.
     """
     net_cfg = config["network"]
     sim_cfg = config["simulation"]
-    demand_cfg = config["demand"]
     veh_cfg = config.get("vehicle", {})
 
     spd = net_cfg["speed_limit_mps"]
-    duration = sim_cfg["duration_s"]
-    vph = demand_cfg["mainline_demand_vph"]
+    warmup_s = float(sim_cfg.get("warmup_s", 0.0))
+    if not math.isfinite(warmup_s) or warmup_s < 0.0:
+        raise ValueError("simulation.warmup_s must be finite and non-negative")
     tau = veh_cfg.get("idm_tau_s", 1.0)   # default: SUMO built-in IDM default
     # Per-vehicle desired-speed spread (SUMO speedDev). 0.0 keeps Phase 1 fully
     # deterministic (the SUMO seed then has no effect at all); SUMO's own
@@ -326,13 +328,14 @@ def _write_routes(path: Path, config: dict, mainline_blocks: list[tuple[float, f
         '\n'
     )
     if mainline_blocks is None:
-        blocks = [(0.0, float(duration), float(vph))]
+        mainline, _ = scenario_demands(config)
+        blocks = _mainline_flow_intervals(mainline, float(sim_cfg["dt_ctrl_s"]), warmup_s)
     else:
         blocks = [(float(b), float(e), float(v)) for b, e, v in mainline_blocks]
     for i, (begin, end, block_vph) in enumerate(blocks):
         if block_vph <= 0.0:
             continue
-        flow_id = "mainline_flow" if mainline_blocks is None else f"mainline_flow_{i:02d}"
+        flow_id = "mainline_flow" if len(blocks) == 1 else f"mainline_flow_{i:02d}"
         content += (
             f'    <flow id="{flow_id}"\n'
             '          type="passenger"\n'
@@ -344,6 +347,45 @@ def _write_routes(path: Path, config: dict, mainline_blocks: list[tuple[float, f
         )
     content += "</routes>\n"
     path.write_text(content)
+
+
+def _mainline_flow_intervals(
+    mainline, dt_ctrl_s: float, warmup_s: float
+) -> list[tuple[float, float, float]]:
+    """Build mainline-flow intervals including a constant pre-roll.
+
+    The learning-horizon profile is shifted by ``warmup_s``. During the
+    pre-roll, the first requested mainline demand is held constant. Adjacent
+    equal-rate intervals are coalesced so a constant episode remains one SUMO
+    flow spanning warm-up plus the recorded horizon.
+    """
+    if len(mainline) == 0:
+        return []
+
+    raw: list[tuple[float, float, float]] = []
+    if warmup_s > 0.0:
+        raw.append((0.0, warmup_s, float(mainline[0])))
+
+    boundaries = [0] + [
+        k for k in range(1, len(mainline)) if mainline[k] != mainline[k - 1]
+    ] + [len(mainline)]
+    for start, end in zip(boundaries[:-1], boundaries[1:]):
+        raw.append(
+            (
+                warmup_s + start * dt_ctrl_s,
+                warmup_s + end * dt_ctrl_s,
+                float(mainline[start]),
+            )
+        )
+
+    merged: list[tuple[float, float, float]] = []
+    for begin_s, end_s, vph in raw:
+        if merged and merged[-1][2] == vph and math.isclose(merged[-1][1], begin_s):
+            previous_begin, _, _ = merged[-1]
+            merged[-1] = (previous_begin, end_s, vph)
+        else:
+            merged.append((begin_s, end_s, vph))
+    return merged
 
 
 def _acceleration_lane_length(net_cfg: dict) -> float:

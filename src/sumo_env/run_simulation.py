@@ -35,8 +35,13 @@ except ImportError as exc:
         "bindings are on PYTHONPATH (e.g. export PYTHONPATH=$SUMO_HOME/tools)."
     ) from exc
 
-from sumo_env.detectors import get_detector_ids, get_detector_ids_per_lane, get_x_grid
+from sumo_env.detectors import (
+    get_detector_ids,
+    get_detector_ids_per_lane,
+    get_x_grid,
+)
 from sumo_env.ramp_queue import MeteredRampQueue
+from sumo_env.demand_profiles import scenario_demands
 
 
 def run_simulation(
@@ -61,6 +66,7 @@ def run_simulation(
             "speed":           np.float32, shape (N_x, T_ctrl), km/h
             "flow":            np.float32, shape (N_x, T_ctrl), veh/hr
             "exit_boundary_flow_vph": np.float32, shape (T_ctrl,), mean flow of the last 3 detectors
+            "network_outflow_vph": np.float32, shape (T_ctrl,), exact network arrivals per interval
             "x_grid":          np.float32, shape (N_x,),        metres from upstream
             "t_grid":          np.float32, shape (T_ctrl,),     seconds (start of each interval)
             "mainline_demand": np.float32, shape (T_ctrl,),     veh/hr (constant for this profile)
@@ -79,11 +85,22 @@ def run_simulation(
     dt_ctrl: int = sim_cfg["dt_ctrl_s"]               # 30 s
     dt_ctrl_steps: int = int(dt_ctrl / step_len)      # 30 sub-steps per control step
     T_ctrl: int = int(sim_cfg["duration_s"] / dt_ctrl)  # 120
-    warmup_s: float = float(sim_cfg.get("ramp_warmup_s", 0.0))
+    warmup_s: float = float(sim_cfg.get("warmup_s", 0.0))
+    warmup_ramp_control: float = float(sim_cfg.get("warmup_ramp_control", 0.5))
+    if not np.isfinite(warmup_s) or warmup_s < 0.0:
+        raise ValueError("simulation.warmup_s must be finite and non-negative")
+    if not 0.0 <= warmup_ramp_control <= 1.0:
+        raise ValueError("simulation.warmup_ramp_control must be in [0, 1]")
+    warmup_steps_exact = warmup_s / step_len
+    warmup_steps = int(round(warmup_steps_exact))
+    if not np.isclose(warmup_steps, warmup_steps_exact):
+        raise ValueError("simulation.warmup_s must be divisible by step_length_s")
+    ramp_warmup_s = float(sim_cfg.get("ramp_warmup_s", 0.0))
     seed: int = sim_cfg["seed"]
     sumo_binary: str = sim_cfg["sumo_binary"]
 
     ramp_demand_vph: float = demand_cfg["ramp_demand_vph"]
+    mainline_demand, ramp_demand = scenario_demands(config)
     # Ramp model (M7 §7.13): "open_loop" inserts ramp_control * ramp_demand_vph
     # directly (M2 behaviour, inflow <= ramp_demand_vph); "metered_queue" mirrors
     # SumoEnv — arrivals at ramp_demand_vph wait in a virtual queue and the meter
@@ -102,6 +119,8 @@ def run_simulation(
     N_x = len(det_ids)
     if N_x < 3:
         raise ValueError("exit_boundary_flow_vph requires at least 3 detectors")
+    exit_flow_indices = np.arange(N_x - 3, N_x, dtype=np.int64)
+    exit_flow_positions_m = x_grid[exit_flow_indices]
 
     t_grid = np.arange(T_ctrl, dtype=np.float32) * dt_ctrl
 
@@ -114,6 +133,7 @@ def run_simulation(
     density = np.zeros((N_x, T_ctrl), dtype=np.float32)
     speed = np.zeros((N_x, T_ctrl), dtype=np.float32)
     flow = np.zeros((N_x, T_ctrl), dtype=np.float32)
+    network_outflow_vph = np.zeros(T_ctrl, dtype=np.float32)
 
     sumo_cmd = [
         sumo_binary,
@@ -154,8 +174,107 @@ def run_simulation(
     # Ramp queue tracking (vehicles on the ramp edge per sub-step)
     ramp_queue_samples: list[int] = []
 
+    def _advance_substep(
+        control: float,
+        arrival_demand_vph: float,
+    ) -> tuple[int, int]:
+        """Advance one SUMO step and update shared ramp bookkeeping."""
+        nonlocal veh_counter, frac_accumulator
+        nonlocal total_insert_attempts, total_insert_success
+        nonlocal total_insert_rejected, total_ramp_discarded, total_teleports
+
+        if traci.simulation.getTime() < ramp_warmup_s:
+            n_insert = 0
+        elif meter is not None:
+            meter.arrival_rate = float(arrival_demand_vph) / 3600.0
+            capacity = meter.step(control)
+            # Pending requests still belong to the queue, but SUMO already
+            # owns their IDs. Do not submit them twice.
+            available = max(int(meter.queue) - len(ramp_pending_ids), 0)
+            n_insert = min(capacity, available)
+        else:
+            frac_accumulator += (
+                control * float(arrival_demand_vph) / 3600.0 * step_len
+            )
+            n_insert = int(frac_accumulator)
+            frac_accumulator -= n_insert
+
+        for _ in range(n_insert):
+            total_insert_attempts += 1
+            veh_id = f"ramp_{veh_counter}"
+            try:
+                traci.vehicle.add(
+                    vehID=veh_id,
+                    routeID="route_ramp",
+                    typeID="passenger",
+                    depart=str(traci.simulation.getTime()),
+                    departLane="first",
+                    departPos="free",
+                    departSpeed="0",
+                )
+                veh_counter += 1
+                total_insert_success += 1
+                ramp_pending_ids.add(veh_id)
+            except traci.exceptions.TraCIException:
+                # A rejected request does not serve any demand. Metered
+                # demand stays queued for a later attempt; open-loop request
+                # capacity is not refunded.
+                total_insert_rejected += 1
+
+        traci.simulationStep()
+        arrived = traci.simulation.getArrivedNumber()
+
+        # add() only accepts a request; confirmed departures are the entries
+        # onto the road. A request made during warm-up can legitimately remain
+        # pending into the recorded horizon.
+        departed_ids = set(traci.simulation.getDepartedIDList())
+        pending_ids = set(traci.simulation.getPendingVehicles())
+        ramp_departed = ramp_pending_ids & departed_ids
+        ramp_discarded = ramp_pending_ids - departed_ids - pending_ids
+        ramp_pending_ids.difference_update(ramp_departed | ramp_discarded)
+        total_ramp_discarded += len(ramp_discarded)
+        if meter is not None:
+            meter.on_released(len(ramp_departed))
+
+        total_teleports += traci.simulation.getStartingTeleportNumber()
+        ramp_queue_samples.append(traci.edge.getLastStepVehicleNumber("ramp"))
+        return len(ramp_departed), arrived
+
     try:
         traci.start(sumo_cmd)
+
+        # True pre-roll: hold the episode's initial demands and a fixed meter
+        # command, but do not aggregate detector data into the learning arrays.
+        warmup_departed_total = 0
+        for _ in range(warmup_steps):
+            departed, _ = _advance_substep(
+                warmup_ramp_control,
+                float(ramp_demand[0]),
+            )
+            warmup_departed_total += departed
+
+        warmup_metadata = {
+            "insert_attempts": total_insert_attempts,
+            "insert_success": total_insert_success,
+            "insert_rejected": total_insert_rejected,
+            "ramp_departed_total": warmup_departed_total,
+            "ramp_discarded_total": total_ramp_discarded,
+            "teleports": total_teleports,
+            "virtual_queue_final": float(meter.queue) if meter is not None else 0.0,
+            "ramp_pending_final": len(ramp_pending_ids),
+            "physical_ramp_queue_max": (
+                int(max(ramp_queue_samples)) if ramp_queue_samples else 0
+            ),
+        }
+
+        # The public counters and queue samples describe only the saved horizon.
+        # Physical and virtual vehicle state intentionally carries across.
+        total_insert_attempts = 0
+        total_insert_success = 0
+        total_insert_rejected = 0
+        total_ramp_discarded = 0
+        total_teleports = 0
+        ramp_queue_samples.clear()
 
         for k in range(T_ctrl):
             # Per-step accumulators reset each control interval
@@ -164,71 +283,16 @@ def run_simulation(
             speed_count = np.zeros(N_x, dtype=np.int32)
             sum_occ = np.zeros(N_x, dtype=np.float64)
 
-            # Rate of ramp vehicle insertion this control step [veh/s] (open loop)
-            insert_rate = ramp_control[k] * ramp_demand_vph / 3600.0
             departed_k = 0
+            arrived_k = 0
 
-            for sub in range(dt_ctrl_steps):
-                # --- Ramp vehicle insertion (skipped during warmup) ---
-                # warmup_s lets the initial mainline dense wave (caused by
-                # departSpeed=max) dissipate before any ramp vehicle arrives
-                # at the merge, preventing the cascade-blockage pattern.
-                if traci.simulation.getTime() >= warmup_s:
-                    if meter is not None:
-                        capacity = meter.step(float(ramp_control[k]))
-                        # Pending requests still belong to the queue, but
-                        # SUMO already owns their IDs. Do not submit them twice.
-                        available = max(int(meter.queue) - len(ramp_pending_ids), 0)
-                        n_insert = min(capacity, available)
-                    else:
-                        frac_accumulator += insert_rate * step_len
-                        n_insert = int(frac_accumulator)
-                        frac_accumulator -= n_insert
-                    for _ in range(n_insert):
-                        total_insert_attempts += 1
-                        veh_id = f"ramp_{veh_counter}"
-                        try:
-                            traci.vehicle.add(
-                                vehID=veh_id,
-                                routeID="route_ramp",
-                                typeID="passenger",
-                                depart=str(traci.simulation.getTime()),
-                                departLane="first",
-                                departPos="free",   # first collision-free gap on ramp
-                                departSpeed="0",
-                            )
-                            veh_counter += 1
-                            total_insert_success += 1
-                            ramp_pending_ids.add(veh_id)
-                        except traci.exceptions.TraCIException:
-                            # A rejected request does not serve any demand.
-                            # Metered demand stays queued for a later attempt;
-                            # open-loop request capacity is not refunded.
-                            total_insert_rejected += 1
-
-                # --- Advance simulation by one step ---
-                traci.simulationStep()
-
-                # add() only accepts a request; confirmed departures are the
-                # entries onto the road. Count them in the interval they occur,
-                # including requests delayed across a control boundary.
-                departed_ids = set(traci.simulation.getDepartedIDList())
-                pending_ids = set(traci.simulation.getPendingVehicles())
-                ramp_departed = ramp_pending_ids & departed_ids
-                ramp_discarded = ramp_pending_ids - departed_ids - pending_ids
-                ramp_pending_ids -= ramp_departed | ramp_discarded
-                departed_k += len(ramp_departed)
-                total_ramp_discarded += len(ramp_discarded)
-                if meter is not None:
-                    meter.on_released(len(ramp_departed))
-
-                # --- Count teleports this step ---
-                total_teleports += traci.simulation.getStartingTeleportNumber()
-
-                # --- Sample ramp queue length ---
-                ramp_queue_samples.append(
-                    traci.edge.getLastStepVehicleNumber("ramp")
+            for _ in range(dt_ctrl_steps):
+                departed, arrived = _advance_substep(
+                    float(ramp_control[k]),
+                    float(ramp_demand[k]),
                 )
+                departed_k += departed
+                arrived_k += arrived
 
                 # --- Read detector values for this step ---
                 # Aggregate across lanes at each spatial position.
@@ -271,23 +335,27 @@ def run_simulation(
             ramp_departed_count[k] = departed_k
             ramp_pending_count[k] = len(ramp_pending_ids)
             ramp_inflow_vph[k] = departed_k * 3600.0 / dt_ctrl
+            network_outflow_vph[k] = arrived_k * 3600.0 / dt_ctrl
             ramp_queue[k] = meter.queue if meter is not None else 0.0
 
     finally:
         traci.close()
 
-    mainline_demand = np.full(T_ctrl, demand_cfg["mainline_demand_vph"], dtype=np.float32)
-
     return {
         "density": density,
         "speed": speed,
         "flow": flow,
-        # Spatial mean at each control timestep, using the interval-averaged
-        # detector flows (1700, 1800, 1900 m in the default scenario).
+        # Supervised flow target: spatial mean at each control timestep, using
+        # the final three interval-averaged detector flows (1700, 1800, and
+        # 1900 m in the default scenario).
         "exit_boundary_flow_vph": flow[-3:, :].mean(axis=0),
+        # End-of-road throughput is diagnostic only; it is not a surrogate
+        # target and is not the PPO throughput reward.
+        "network_outflow_vph": network_outflow_vph,
         "x_grid": x_grid,
         "t_grid": t_grid,
         "mainline_demand": mainline_demand,
+        "ramp_demand": ramp_demand,
         # Surrogate branch input: the physical ramp inflow as a fraction of
         # ramp_ref_vph. Open loop: identical to the command (M2 semantics,
         # reference = ramp_demand_vph). Metered queue: inserted flow /
@@ -317,6 +385,8 @@ def run_simulation(
             "sumo_binary": sumo_binary,
             "T_ctrl": T_ctrl,
             "N_x": N_x,
+            "exit_flow_detector_indices": exit_flow_indices.tolist(),
+            "exit_flow_positions_m": exit_flow_positions_m.tolist(),
             # Insertion and teleport diagnostics
             "insert_attempts": total_insert_attempts,
             "insert_success": total_insert_success,
@@ -325,7 +395,30 @@ def run_simulation(
             "ramp_pending_final": len(ramp_pending_ids),
             "ramp_discarded_total": total_ramp_discarded,
             "teleports": total_teleports,
-            "ramp_warmup_s": warmup_s,
+            "ramp_warmup_s": ramp_warmup_s,
+            "warmup_s": warmup_s,
+            "warmup_ramp_control": warmup_ramp_control,
+            "warmup_mainline_demand_vph": float(mainline_demand[0]),
+            "warmup_ramp_demand_vph": float(ramp_demand[0]),
+            "warmup_insert_attempts": warmup_metadata["insert_attempts"],
+            "warmup_insert_success": warmup_metadata["insert_success"],
+            "warmup_insert_rejected": warmup_metadata["insert_rejected"],
+            "warmup_ramp_departed_total": warmup_metadata[
+                "ramp_departed_total"
+            ],
+            "warmup_ramp_discarded_total": warmup_metadata[
+                "ramp_discarded_total"
+            ],
+            "warmup_teleports": warmup_metadata["teleports"],
+            "warmup_virtual_queue_final": warmup_metadata[
+                "virtual_queue_final"
+            ],
+            "warmup_ramp_pending_final": warmup_metadata[
+                "ramp_pending_final"
+            ],
+            "warmup_physical_ramp_queue_max": warmup_metadata[
+                "physical_ramp_queue_max"
+            ],
             "ramp_queue_max": int(max(ramp_queue_samples)) if ramp_queue_samples else 0,
             "ramp_queue_mean": float(np.mean(ramp_queue_samples)) if ramp_queue_samples else 0.0,
         },

@@ -438,6 +438,153 @@ def resolve_profile_source(spec, project_root: Path | None = None, dt_ctrl_s: fl
     return family, fixed
 
 
+# Fixed demand templates restored from the September 20 local-work stash.
+def demand_array(value, steps: int, name: str) -> np.ndarray:
+    values = np.asarray(value, dtype=np.float32)
+    if values.ndim == 0:
+        values = np.full(steps, values, dtype=np.float32)
+    if values.shape != (steps,) or not np.all(np.isfinite(values)) or np.any(values < 0):
+        raise ValueError(f"{name} must be a finite nonnegative scalar or a sequence of length {steps}")
+    return values.copy()
+
+
+def scenario_demands(config: dict) -> tuple[np.ndarray, np.ndarray]:
+    sim, demand = config["simulation"], config["demand"]
+    steps = int(sim["duration_s"] / sim["dt_ctrl_s"])
+    return tuple(demand_array(demand.get(f"{name}_demand_profile", demand[f"{name}_demand_vph"]),
+                              steps, name) for name in ("mainline", "ramp"))
+
+
+def sample_demand_profile(spec: dict, steps: int, rng: np.random.Generator) -> np.ndarray:
+    low, high = float(spec["min_vph"]), float(spec["max_vph"])
+    if not np.isfinite([low, high]).all() or not 0 <= low <= high:
+        raise ValueError("Demand bounds must be finite and satisfy 0 <= min_vph <= max_vph")
+    families = spec.get("types", ["piecewise_constant", "smooth"])
+    if not families or any(f not in {"constant", "piecewise_constant", "smooth"} for f in families):
+        raise ValueError("Demand types must contain constant, piecewise_constant or smooth")
+    family = str(rng.choice(families))
+    if family == "constant" or steps == 1:
+        return demand_array(rng.uniform(low, high), steps, "sampled demand")
+    n_segments = int(spec.get("n_segments", 6))
+    if n_segments < 2:
+        raise ValueError("n_segments must be at least 2 for time-varying demand")
+    n_segments = min(n_segments, steps)
+    if family == "piecewise_constant":
+        cuts = np.sort(rng.choice(np.arange(1, steps), n_segments - 1, replace=False))
+        edges = np.r_[0, cuts, steps]
+        values = np.repeat(rng.uniform(low, high, n_segments), np.diff(edges))
+    else:
+        knots = np.linspace(0, steps - 1, n_segments)
+        values = np.interp(np.arange(steps), knots, rng.uniform(low, high, n_segments))
+    return values.astype(np.float32)
+
+
+def _profile_endpoints(value, name: str) -> tuple[float, float]:
+    """Return the start/end values for one piecewise-linear segment."""
+    values = np.asarray(value, dtype=np.float64)
+    if values.ndim == 0:
+        start = end = float(values)
+    elif values.shape == (2,):
+        start, end = map(float, values)
+    else:
+        raise ValueError(f"{name} must be a scalar or [start, end]")
+    if not np.isfinite([start, end]).all() or start < 0 or end < 0:
+        raise ValueError(f"{name} must contain finite nonnegative demand values")
+    return start, end
+
+
+def _segmented_profile(
+    segments: list[dict],
+    channel: str,
+    steps: int,
+    dt_ctrl_s: float,
+) -> np.ndarray:
+    """Build one channel of a time-aligned, piecewise-linear demand profile."""
+    if not segments:
+        raise ValueError("demand_profile_family.segments must not be empty")
+    if steps < 1 or not np.isfinite(dt_ctrl_s) or dt_ctrl_s <= 0:
+        raise ValueError("steps and dt_ctrl_s must be positive")
+
+    duration_min = steps * dt_ctrl_s / 60.0
+    times_min = np.arange(steps, dtype=np.float64) * dt_ctrl_s / 60.0
+    profile = np.empty(steps, dtype=np.float64)
+    assigned = np.zeros(steps, dtype=bool)
+    previous_end = 0.0
+
+    for index, segment in enumerate(segments):
+        start_min = float(segment["start_min"])
+        end_min = float(segment["end_min"])
+        if not np.isfinite([start_min, end_min]).all() or end_min <= start_min:
+            raise ValueError(f"segment {index} must satisfy end_min > start_min")
+        if not np.isclose(start_min, previous_end):
+            raise ValueError("demand profile segments must be contiguous and start at 0 min")
+
+        start_vph, end_vph = _profile_endpoints(
+            segment[f"{channel}_vph"], f"segment {index} {channel}_vph"
+        )
+        mask = (times_min >= start_min) & (times_min < end_min)
+        fraction = (times_min[mask] - start_min) / (end_min - start_min)
+        profile[mask] = start_vph + fraction * (end_vph - start_vph)
+        assigned[mask] = True
+        previous_end = end_min
+
+    if not np.isclose(previous_end, duration_min):
+        raise ValueError(
+            "demand profile segments must end at the simulation duration "
+            f"({duration_min:g} min)"
+        )
+    if not assigned.all():
+        raise ValueError("demand profile segments do not cover every control step")
+    return profile.astype(np.float32)
+
+
+def sample_joint_demand_profile(
+    spec: dict,
+    steps: int,
+    dt_ctrl_s: float,
+    rng: np.random.Generator,
+    sample_index: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sample a coordinated mainline/ramp profile from a scaled template.
+
+    The common segment timing preserves the loading, ramp-pulse, and recovery
+    phases. Independent channel scales vary both total demand and ramp share.
+    Every ``nominal_every_n`` sample uses scale 1.0 so the exact reference
+    profile is represented in the training set.
+    """
+    if spec.get("type", "scaled_template") != "scaled_template":
+        raise ValueError("demand_profile_family.type must be 'scaled_template'")
+    if sample_index < 0:
+        raise ValueError("sample_index must be nonnegative")
+
+    segments = spec.get("segments")
+    mainline = _segmented_profile(segments, "mainline", steps, dt_ctrl_s)
+    ramp = _segmented_profile(segments, "ramp", steps, dt_ctrl_s)
+
+    nominal_every_n = int(spec.get("nominal_every_n", 0))
+    if nominal_every_n < 0:
+        raise ValueError("nominal_every_n must be nonnegative")
+    nominal = nominal_every_n > 0 and sample_index % nominal_every_n == 0
+
+    scales = []
+    for channel in ("mainline", "ramp"):
+        bounds = np.asarray(spec.get(f"{channel}_scale_range", [1.0, 1.0]), dtype=float)
+        if (
+            bounds.shape != (2,)
+            or not np.isfinite(bounds).all()
+            or bounds[0] <= 0
+            or bounds[0] > bounds[1]
+        ):
+            raise ValueError(
+                f"{channel}_scale_range must be two positive ordered values"
+            )
+        scales.append(1.0 if nominal else float(rng.uniform(bounds[0], bounds[1])))
+
+    return (mainline * scales[0]).astype(np.float32), (ramp * scales[1]).astype(np.float32)
+
+
+
+
 if __name__ == "__main__":  # pragma: no cover
     import argparse
 

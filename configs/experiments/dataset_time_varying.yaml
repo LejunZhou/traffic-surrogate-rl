@@ -1,0 +1,45 @@
+# Direct demand-and-control operator:
+# (mainline arrivals, ramp arrivals, u) -> (density, mean exit flow).
+base_sumo_config: configs/sumo/phase1_1.yaml
+
+dataset:
+  n_samples: 1000
+  random_seed: 42
+  # Run SUMO for three minutes before the one-hour learning horizon. During
+  # this discarded pre-roll, mainline and ramp demand are held at the first
+  # values of the sampled episode profile and the ramp meter is fixed at 0.5.
+  # The saved .npz arrays remain 120 steps long with t_grid starting at zero.
+  warmup_s: 180
+  warmup_ramp_control: 0.5
+  # One-hour classical ramp-metering profile adapted to the one-lane merge.
+  # Every eleventh rollout uses the exact reference values below. Other rollouts
+  # independently scale the two demand channels by 0.9--1.1, varying both the
+  # total load and ramp share while preserving loading, overload, and recovery.
+  demand_profile_family:
+    type: scaled_template
+    # Eleven is coprime with the four control families, so exact-profile
+    # rollouts rotate through every ramp-control family instead of only two.
+    nominal_every_n: 11
+    mainline_scale_range: [0.9, 1.1]
+    ramp_scale_range: [0.9, 1.1]
+    segments:
+      - {start_min: 0,  end_min: 10, mainline_vph: 1250,         ramp_vph: 250}
+      - {start_min: 10, end_min: 20, mainline_vph: 1600,         ramp_vph: 400}
+      - {start_min: 20, end_min: 25, mainline_vph: [1600, 1800], ramp_vph: [400, 900]}
+      - {start_min: 25, end_min: 40, mainline_vph: 1800,         ramp_vph: 900}
+      - {start_min: 40, end_min: 45, mainline_vph: 1800,         ramp_vph: [900, 300]}
+      - {start_min: 45, end_min: 50, mainline_vph: [1800, 1100], ramp_vph: 300}
+      - {start_min: 50, end_min: 60, mainline_vph: 1100,         ramp_vph: 300}
+  ramp_control_types: [constant, piecewise_constant, smooth, ramp_step]
+
+splits:
+  train_frac: 0.8
+  val_frac: 0.1
+  test_frac: 0.1
+
+output:
+  raw_dir: data/raw/time_varying
+  splits_dir: data/splits/time_varying
+  network_dir: data/raw/time_varying/network
+  save_heatmaps: true
+  heatmap_every_n: 25

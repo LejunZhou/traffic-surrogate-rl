@@ -1,9 +1,10 @@
 """
 Generate base SUMO rollouts by sweeping over demand levels and control signals.
 
-Milestone 2 MVP: constant demand levels only (1000, 1500, 2000 veh/hr).
-Time-varying demand profiles are deferred to 2b. Truncated/zero-padded
-control views are generated later by surrogate.datasets.TrafficDataset so the
+Supports constant demand levels, independently sampled demand channels, and a
+coordinated scaled-template family for time-varying mainline/ramp arrivals.
+Truncated/masked input views are
+generated later by surrogate.datasets.TrafficDataset so the
 same physical rollout can supervise both full-control and RL-style partial
 control inputs without rerunning SUMO.
 
@@ -17,10 +18,12 @@ Dataset schema (per sample .npz):
     density:             (N_x, T_ctrl)     veh/km — supervised target
     speed:               (N_x, T_ctrl)     km/h   — diagnostic only
     flow:                (N_x, T_ctrl)     veh/hr — diagnostic only
-    exit_boundary_flow_vph: (T_ctrl,)      veh/hr — mean of last 3 detector flows at each timestep
+    exit_boundary_flow_vph: (T_ctrl,)      veh/hr — mean of the last 3 detector flows
+    network_outflow_vph: (T_ctrl,)         veh/hr — exact end-of-road arrivals; diagnostic
     x_grid:              (N_x,)            detector positions in metres
     t_grid:              (T_ctrl,)         control step timestamps in seconds
-    mainline_demand:     (T_ctrl,)         veh/hr (constant in MVP)
+    mainline_demand:     (T_ctrl,)         requested mainline arrivals, veh/hr
+    ramp_demand:         (T_ctrl,)         ramp arrivals before metering, veh/hr
     ramp_control:        (T_ctrl,)         confirmed inflow / reference (command in open_loop)
     ramp_control_cmd:    (T_ctrl,)         requested metering rate ∈ [0, 1]
     ramp_inflow_vph:     (T_ctrl,)         confirmed ramp entries / interval hours
@@ -41,6 +44,7 @@ from pathlib import Path
 import numpy as np
 
 from sumo_env.network_builder import build_network
+from sumo_env.demand_profiles import sample_demand_profile, sample_joint_demand_profile
 from sumo_env.detectors import build_detector_file
 from sumo_env.run_simulation import run_simulation
 from utils.config import load_config, merge_configs
@@ -192,12 +196,20 @@ def generate_dataset(
     )
 
     ds = ds_config["dataset"]
+    profile_specs = ds.get("demand_profiles", {})
+    profile_family = ds.get("demand_profile_family")
+    if set(profile_specs) - {"mainline", "ramp"}:
+        raise ValueError("dataset.demand_profiles supports only mainline and ramp")
+    if profile_specs and profile_family:
+        raise ValueError("Use either dataset.demand_profiles or dataset.demand_profile_family, not both")
+    if (profile_specs or profile_family) and base_sumo_config["demand"].get("ramp_model") != "metered_queue":
+        raise ValueError("Time-varying demand datasets require demand.ramp_model: metered_queue")
     out = ds_config["output"]
     n_samples: int = ds["n_samples"]
     seed: int = ds["random_seed"]
     start_index: int = int(ds.get("start_index", 0))
     overwrite: bool = bool(ds.get("overwrite", False))
-    demand_levels: list[float] = ds["demand_levels"]
+    demand_levels: list[float] = ds.get("demand_levels", [base_sumo_config["demand"]["mainline_demand_vph"]])
     # Ramp arrival rates (vph) cycled per sample alongside the mainline levels;
     # default = the scenario's demand.ramp_demand_vph (single level).
     ramp_demand_levels: list[float] = [
@@ -215,6 +227,8 @@ def generate_dataset(
 
     sim_cfg = base_sumo_config["simulation"]
     T_ctrl = int(sim_cfg["duration_s"] / sim_cfg["dt_ctrl_s"])
+    warmup_s = float(ds.get("warmup_s", 0.0))
+    warmup_ramp_control = float(ds.get("warmup_ramp_control", 0.5))
 
     # Build network topology + detectors once (reused across all runs).
     # Routes will be rebuilt per demand level.
@@ -227,7 +241,14 @@ def generate_dataset(
     routes_by_demand: dict[float, str] = {}
     for demand_vph in demand_levels:
         cfg_for_demand = merge_configs(
-            base_sumo_config, {"demand": {"mainline_demand_vph": demand_vph}}
+            base_sumo_config,
+            {
+                "demand": {"mainline_demand_vph": demand_vph},
+                "simulation": {
+                    "warmup_s": warmup_s,
+                    "warmup_ramp_control": warmup_ramp_control,
+                },
+            },
         )
         route_path = network_dir / f"routes_{int(demand_vph)}.rou.xml"
         from sumo_env.network_builder import _write_routes
@@ -244,7 +265,8 @@ def generate_dataset(
 
     print(
         f"[dataset] Generating {n_samples} samples "
-        f"(indices {start_index:04d}..{start_index + n_samples - 1:04d}) ..."
+        f"(indices {start_index:04d}..{start_index + n_samples - 1:04d}, "
+        f"warm-up={warmup_s:g}s at u={warmup_ramp_control:g}) ..."
     )
     for i in range(n_samples):
         sample_index = start_index + i
@@ -256,18 +278,57 @@ def generate_dataset(
 
         ramp_control = sample_ramp_control(control_type, T_ctrl, rng)
 
+        # Independent per-index RNG makes appended demand profiles reproducible.
+        profile_rng = np.random.default_rng(np.random.SeedSequence([seed, sample_index, 104729]))
+        if profile_family:
+            mainline_profile, ramp_profile = sample_joint_demand_profile(
+                profile_family,
+                T_ctrl,
+                float(sim_cfg["dt_ctrl_s"]),
+                profile_rng,
+                sample_index=sample_index,
+            )
+            profiles = {
+                "mainline_demand_profile": mainline_profile.tolist(),
+                "ramp_demand_profile": ramp_profile.tolist(),
+            }
+        else:
+            profiles = {
+                f"{name}_demand_profile": sample_demand_profile(spec, T_ctrl, profile_rng).tolist()
+                for name, spec in profile_specs.items()
+            }
+        episode_mainline_vph = float(
+            np.mean(profiles.get("mainline_demand_profile", demand_vph))
+        )
+        episode_ramp_vph = float(
+            np.mean(profiles.get("ramp_demand_profile", ramp_demand_vph))
+        )
+        traj_path = raw_dir / f"sim_{sample_index:04d}.npz"
+        if traj_path.exists() and not overwrite:
+            raise FileExistsError(f"{traj_path} already exists. Use --append, --start-index or --overwrite.")
+
         # Build config with the chosen demand level
         sim_config = merge_configs(
             base_sumo_config,
             {
-                "demand": {"mainline_demand_vph": demand_vph, "ramp_demand_vph": ramp_demand_vph},
-                "simulation": {"seed": seed + sample_index},
+                "demand": {"mainline_demand_vph": demand_vph, "ramp_demand_vph": ramp_demand_vph, **profiles},
+                "simulation": {
+                    "seed": seed + sample_index,
+                    "warmup_s": warmup_s,
+                    "warmup_ramp_control": warmup_ramp_control,
+                },
             },
         )
 
+        route_file = routes_by_demand[demand_vph]
+        if "mainline_demand_profile" in sim_config["demand"]:
+            route_path = network_dir / f"routes_profile_{sample_index:04d}.rou.xml"
+            _write_routes(route_path, sim_config)
+            route_file = str(route_path.resolve())
+
         result = run_simulation(
             net_file=network_files["net"],
-            route_file=routes_by_demand[demand_vph],
+            route_file=route_file,
             detector_file=det_file,
             ramp_control=ramp_control,
             config=sim_config,
@@ -277,22 +338,17 @@ def generate_dataset(
         total_teleports += teleports
 
         # Save .npz
-        traj_path = raw_dir / f"sim_{sample_index:04d}.npz"
-        if traj_path.exists() and not overwrite:
-            raise FileExistsError(
-                f"{traj_path} already exists. Use --append to continue after "
-                "existing files, --start-index to choose a different index, "
-                "or --overwrite to replace existing files."
-            )
         np.savez(
             str(traj_path),
             density=result["density"],
             speed=result["speed"],
             flow=result["flow"],
             exit_boundary_flow_vph=result["exit_boundary_flow_vph"],
+            network_outflow_vph=result["network_outflow_vph"],
             x_grid=result["x_grid"],
             t_grid=result["t_grid"],
             mainline_demand=result["mainline_demand"],
+            ramp_demand=result["ramp_demand"],
             ramp_control=result["ramp_control"],
             ramp_control_cmd=result["ramp_control_cmd"],
             ramp_inflow_vph=result["ramp_inflow_vph"],
@@ -303,10 +359,36 @@ def generate_dataset(
             ramp_model=np.array(result["metadata"]["ramp_model"]),
             ramp_ref_vph=np.array(result["metadata"]["ramp_ref_vph"]),
             ramp_discharge_vph=np.array(result["metadata"]["ramp_discharge_vph"]),
+            warmup_s=np.array(result["metadata"]["warmup_s"]),
+            warmup_ramp_control=np.array(
+                result["metadata"]["warmup_ramp_control"]
+            ),
+            warmup_mainline_demand_vph=np.array(
+                result["metadata"]["warmup_mainline_demand_vph"]
+            ),
+            warmup_ramp_demand_vph=np.array(
+                result["metadata"]["warmup_ramp_demand_vph"]
+            ),
+            warmup_virtual_queue_final=np.array(
+                result["metadata"]["warmup_virtual_queue_final"]
+            ),
+            warmup_ramp_pending_final=np.array(
+                result["metadata"]["warmup_ramp_pending_final"]
+            ),
+            warmup_teleports=np.array(result["metadata"]["warmup_teleports"]),
+            exit_flow_detector_indices=np.array(
+                result["metadata"]["exit_flow_detector_indices"],
+                dtype=np.int64,
+            ),
+            exit_flow_positions_m=np.array(
+                result["metadata"]["exit_flow_positions_m"],
+                dtype=np.float32,
+            ),
             seed=np.array(sim_config["simulation"]["seed"]),
-            mainline_demand_vph=np.array(demand_vph),
+            # Scalar fields are episode means; the sequences above are authoritative.
+            mainline_demand_vph=np.array(result["mainline_demand"].mean()),
             ramp_demand_vph=np.array(
-                result["metadata"]["ramp_demand_vph"]
+                result["ramp_demand"].mean()
             ),
         )
         saved_paths.append(traj_path)
@@ -320,7 +402,8 @@ def generate_dataset(
                 t_grid=result["t_grid"],
                 output_path=plot_path,
                 title=(
-                    f"sim_{sample_index:04d} — {int(demand_vph)} vph, "
+                    f"sim_{sample_index:04d} — mean demand "
+                    f"{episode_mainline_vph:.0f}+{episode_ramp_vph:.0f} vph, "
                     f"{control_type}, seed={sim_config['simulation']['seed']}"
                 ),
             )
@@ -331,7 +414,8 @@ def generate_dataset(
         departed = result["metadata"]["ramp_departed_total"]
         print(
             f"  [{i+1:>{len(str(n_samples))}}/{n_samples}] "
-            f"demand={int(demand_vph):>4}+{int(ramp_demand_vph):<3}, ctrl={control_type:<20s}, "
+            f"mean demand={episode_mainline_vph:4.0f}+{episode_ramp_vph:<3.0f}, "
+            f"ctrl={control_type:<20s}, "
             f"inflow_max={result['metadata']['ramp_inflow_max_vph']:4.0f}vph, "
             f"requests={inserts}/{attempts}, entered={departed}, {status}"
         )
@@ -572,11 +656,14 @@ def make_splits(
 
     # Compute normalization stats from training set only
     train_densities = []
+    train_flows = []
     train_demands = []
     for fname in splits["train"]:
         data = np.load(str(raw_path / fname))
         train_densities.append(data["density"])
-        train_demands.append(float(data["mainline_demand_vph"]))
+        if "exit_boundary_flow_vph" in data.files:
+            train_flows.append(data["exit_boundary_flow_vph"])
+        train_demands.extend(data["mainline_demand"].ravel().tolist())
 
     all_density = np.concatenate(
         [d.ravel() for d in train_densities]
@@ -599,6 +686,12 @@ def make_splits(
         "n_total": n,
         "seed": seed,
     }
+    if len(train_flows) == len(splits["train"]):
+        all_flow = np.concatenate([q.ravel() for q in train_flows])
+        metadata.update(
+            mean_flow=float(np.mean(all_flow)),
+            std_flow=float(np.std(all_flow)),
+        )
 
     # Save split indices
     split_index = {**splits, "metadata": metadata}
@@ -614,6 +707,11 @@ def make_splits(
     print(f"[splits] train={len(splits['train'])}, "
           f"val={len(splits['val'])}, test={len(splits['test'])}")
     print(f"[splits] density: mean={mean_density:.3f}, std={std_density:.3f}")
+    if "mean_flow" in metadata:
+        print(
+            f"[splits] flow:    mean={metadata['mean_flow']:.3f}, "
+            f"std={metadata['std_flow']:.3f}"
+        )
     print(f"[splits] demand:  min={min_demand:.0f}, max={max_demand:.0f}")
     print(f"[splits] Saved to {splits_path}")
 
@@ -665,7 +763,7 @@ if __name__ == "__main__":
         help="Allow replacing existing sim_*.npz files.",
     )
     parser.add_argument("--reuse-network", action="store_true", help="family schema: reuse a pre-built network dir")
-    parser.add_argument("--no-splits", action="store_true", help="family schema: skip make_splits (the launcher does it once)")
+    parser.add_argument("--no-splits", action="store_true", help="Skip train/validation/test split generation")
     parser.add_argument("--indices-file", default=None, help="family schema: JSON list of global plan indices to generate")
     args = parser.parse_args()
     if args.append and args.start_index is not None:
@@ -706,14 +804,15 @@ if __name__ == "__main__":
 
     saved = generate_dataset(tmp_path, project_root=_PROJECT_ROOT)
 
-    # Run splits
-    out = ds_cfg["output"]
-    splits = ds_cfg["splits"]
-    make_splits(
-        raw_dir=str(_PROJECT_ROOT / out["raw_dir"]),
-        splits_dir=str(_PROJECT_ROOT / out["splits_dir"]),
-        config=splits,
-        seed=ds_cfg["dataset"]["random_seed"],
-    )
+    if not args.no_splits:
+        # Run splits
+        out = ds_cfg["output"]
+        splits = ds_cfg["splits"]
+        make_splits(
+            raw_dir=str(_PROJECT_ROOT / out["raw_dir"]),
+            splits_dir=str(_PROJECT_ROOT / out["splits_dir"]),
+            config=splits,
+            seed=ds_cfg["dataset"]["random_seed"],
+        )
 
     Path(tmp_path).unlink(missing_ok=True)
