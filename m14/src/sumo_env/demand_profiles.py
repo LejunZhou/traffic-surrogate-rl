@@ -1,16 +1,11 @@
 """
 Time-varying demand profiles for the M14 freeway scenario.
 
-A *profile* is a pair of piecewise-constant rate functions on 5-minute
-blocks: mainline demand d_k and ramp arrival rate r_k, expanded to the
-K = 120 control steps of an episode. Profiles are drawn from a parametric
-family (configs/demand.yaml) by a sampler that is seeded by
-(set name, index), so every method that asks for "validation profile 7"
-gets byte-identical inputs.
-
-Frozen sets (configs/profiles/{val,test,ood}.json) are produced once by
-`build_fixed_sets` and loaded with `load_profile_set`; the JSON stores the
-12 block values, the family parameters and the SUMO seeds of each profile.
+The current study uses the exact piecewise-linear schedule in
+configs/scenario.yaml, sampled at 30-second interval starts. Evaluation
+JSONs reference that scenario and specify independent simulator seeds.
+The legacy configs/demand.yaml parametric five-minute family and embedded
+profile JSON format remain supported for explicit historical experiments.
 
 Shared by the dataset generator, SumoEnv and SurrogateVecEnv.
 """
@@ -163,6 +158,84 @@ def _bump(s: np.ndarray) -> np.ndarray:
     return out
 
 
+def _profile_endpoints(value, name: str) -> tuple[float, float]:
+    """Return the start/end values for one piecewise-linear segment."""
+    values = np.asarray(value, dtype=np.float64)
+    if values.ndim == 0:
+        start = end = float(values)
+    elif values.shape == (2,):
+        start, end = map(float, values)
+    else:
+        raise ValueError(f"{name} must be a scalar or [start, end]")
+    if not np.isfinite([start, end]).all() or start < 0 or end < 0:
+        raise ValueError(f"{name} must contain finite nonnegative demand values")
+    return start, end
+
+
+def _segmented_profile(
+    segments: list[dict],
+    channel: str,
+    steps: int,
+    dt_ctrl_s: float,
+) -> np.ndarray:
+    """Build one channel of a time-aligned, piecewise-linear demand profile."""
+    if not segments:
+        raise ValueError("demand.profile_segments must not be empty")
+    if steps < 1 or not np.isfinite(dt_ctrl_s) or dt_ctrl_s <= 0:
+        raise ValueError("steps and dt_ctrl_s must be positive")
+
+    duration_min = steps * dt_ctrl_s / 60.0
+    times_min = np.arange(steps, dtype=np.float64) * dt_ctrl_s / 60.0
+    profile = np.empty(steps, dtype=np.float64)
+    assigned = np.zeros(steps, dtype=bool)
+    previous_end = 0.0
+
+    for index, segment in enumerate(segments):
+        start_min = float(segment["start_min"])
+        end_min = float(segment["end_min"])
+        if not np.isfinite([start_min, end_min]).all() or end_min <= start_min:
+            raise ValueError(f"segment {index} must satisfy end_min > start_min")
+        if not np.isclose(start_min, previous_end):
+            raise ValueError("demand profile segments must be contiguous and start at 0 min")
+
+        start_vph, end_vph = _profile_endpoints(
+            segment[f"{channel}_vph"], f"segment {index} {channel}_vph"
+        )
+        mask = (times_min >= start_min) & (times_min < end_min)
+        fraction = (times_min[mask] - start_min) / (end_min - start_min)
+        profile[mask] = start_vph + fraction * (end_vph - start_vph)
+        assigned[mask] = True
+        previous_end = end_min
+
+    if not np.isclose(previous_end, duration_min):
+        raise ValueError(
+            "demand profile segments must end at the simulation duration "
+            f"({duration_min:g} min)"
+        )
+    if not assigned.all():
+        raise ValueError("demand profile segments do not cover every control step")
+    return profile.astype(np.float32)
+
+
+def scenario_demand_profile(config: dict, set_name: str = "train", index: int = 0) -> DemandProfile:
+    """Exact scenario schedule sampled at control-interval starts (no averaging)."""
+    sim = config["simulation"]
+    dt = float(sim["dt_ctrl_s"])
+    steps = int(float(sim["duration_s"]) / dt)
+    segments = config["demand"]["profile_segments"]
+    mainline = _segmented_profile(segments, "mainline", steps, dt)
+    ramp = _segmented_profile(segments, "ramp", steps, dt)
+    ramp_peak = max(max(_profile_endpoints(seg["ramp_vph"], "ramp_vph")) for seg in segments)
+    pulse = [seg for seg in segments if max(_profile_endpoints(seg["ramp_vph"], "ramp_vph")) == ramp_peak]
+    return DemandProfile(
+        mainline, ramp, block_min=dt / 60.0, dt_ctrl_s=dt,
+        params={"mainline": {"family": "fixed"}, "ramp": {"family": "fixed"},
+                "source": "scenario", "evaluation_kind": "fixed_schedule",
+                "storage_window_min": [float(pulse[0]["start_min"]), float(pulse[-1]["end_min"])]},
+        set_name=set_name, index=index,
+    )
+
+
 class ProfileFamily:
     """Seeded sampler for the parametric demand-profile family."""
 
@@ -173,11 +246,17 @@ class ProfileFamily:
             with Path(config).open("r", encoding="utf-8") as f:
                 config = yaml.safe_load(f)
         self.cfg = copy.deepcopy(config)
+        self.is_fixed = bool(self.cfg.get("demand", {}).get("profile_segments"))
         self.version = int(self.cfg.get("version", 1))
         self.block_min = float(self.cfg.get("block_min", 5))
         self.horizon_min = float(self.cfg.get("horizon_min", 60))
         self.n_blocks = int(round(self.horizon_min / self.block_min))
         self.dt_ctrl_s = float(dt_ctrl_s)
+        if self.is_fixed:
+            self.dt_ctrl_s = float(self.cfg["simulation"]["dt_ctrl_s"])
+            self.block_min = self.dt_ctrl_s / 60.0
+            self.horizon_min = float(self.cfg["simulation"]["duration_s"]) / 60.0
+            self.n_blocks = int(round(self.horizon_min / self.block_min))
         # fine time grid (1 s) for block averaging of the continuous shapes
         self._t_fine = (np.arange(int(self.horizon_min * 60)) + 0.5) / 60.0  # minutes
 
@@ -198,6 +277,8 @@ class ProfileFamily:
 
     # -- sampling -----------------------------------------------------------
     def sample(self, rng: np.random.Generator, set_name: str = "train", index: int = -1) -> DemandProfile:
+        if self.is_fixed:
+            return scenario_demand_profile(self.cfg, set_name, index)
         m_family = self._choose(rng, self.cfg["mainline"]["families"])
         r_family = self._choose(rng, self.cfg["ramp"]["families"])
         d_fine, m_params = self._sample_mainline(rng, m_family)
@@ -208,6 +289,8 @@ class ProfileFamily:
         return self.sample(self.rng_for(set_name, index), set_name, index)
 
     def sample_ood(self, rng: np.random.Generator, kind: str, set_name: str = "ood", index: int = -1) -> DemandProfile:
+        if self.is_fixed:
+            return self.sample(rng, set_name, index)
         ood = self.cfg["ood"]
         if kind == "double":
             c = ood["double"]
@@ -334,6 +417,11 @@ def build_validation_set(family: ProfileFamily, n: int = 18, base_seed: int = 10
     Candidates are drawn from the family with the 'val' seed stream; the
     tertile edges come from a 2000-profile sample of the training family.
     """
+    if family.is_fixed:
+        profiles = [family.sample_by_key("val", i) for i in range(n)]
+        for i, p in enumerate(profiles):
+            p.sumo_seeds = [base_seed + i]
+        return profiles
     ref = [family.sample_by_key("train", i) for i in range(2000)]
     edges = np.quantile([p.peak_total_vph for p in ref], [1 / 3, 2 / 3])
     per_cell = max(1, n // 6)
@@ -362,7 +450,7 @@ def build_test_set(family: ProfileFamily, n: int = 30, seeds=(100, 101, 102)) ->
     out = []
     for i in range(n):
         p = family.sample_by_key("test", i)
-        p.sumo_seeds = list(seeds)
+        p.sumo_seeds = [int(seed) + i * len(seeds) for seed in seeds] if family.is_fixed else list(seeds)
         out.append(p)
     return out
 
@@ -373,7 +461,7 @@ def build_ood_set(family: ProfileFamily, n: int = 12, seeds=(100, 101, 102)) -> 
     for i in range(n):
         kind = kinds[i % len(kinds)]
         p = family.sample_ood(family.rng_for("ood", i), kind, "ood", i)
-        p.sumo_seeds = list(seeds)
+        p.sumo_seeds = [int(seed) + i * len(seeds) for seed in seeds] if family.is_fixed else list(seeds)
         out.append(p)
     return out
 
@@ -393,11 +481,36 @@ def save_profile_set(profiles: list[DemandProfile], path: str | Path, family_pat
 def load_profile_set(path: str | Path) -> list[DemandProfile]:
     with Path(path).open("r", encoding="utf-8") as f:
         payload = json.load(f)
+    if "scenario" in payload:
+        scenario_path = (Path(path).resolve().parent / payload["scenario"]).resolve()
+        family = ProfileFamily.load(scenario_path)
+        if not family.is_fixed:
+            raise ValueError(f"{scenario_path} needs demand.profile_segments")
+        n = int(payload["n"])
+        repeats = int(payload.get("seeds_per_profile", 1))
+        base = int(payload["seed_base"])
+        profiles = [family.sample_by_key(payload["set"], i) for i in range(n)]
+        for i, profile in enumerate(profiles):
+            profile.sumo_seeds = list(range(base + i * repeats, base + (i + 1) * repeats))
+        return profiles
     return [DemandProfile.from_dict(d) for d in payload["profiles"]]
 
 
 def build_fixed_sets(family_path: str | Path, out_dir: str | Path, dt_ctrl_s: float = 30.0) -> dict[str, list[DemandProfile]]:
     family = ProfileFamily.load(family_path, dt_ctrl_s=dt_ctrl_s)
+    if family.is_fixed:
+        import os
+        output = Path(out_dir)
+        output.mkdir(parents=True, exist_ok=True)
+        result = {}
+        for name, n, repeats, seed in (("val", 18, 1, 10000), ("test", 30, 3, 20000), ("ood", 12, 3, 30000)):
+            path = output / f"{name}.json"
+            payload = {"set": name, "scenario": os.path.relpath(Path(family_path).resolve(), output.resolve()),
+                       "n": n, "seeds_per_profile": repeats, "seed_base": seed,
+                       "description": "Fixed schedule; ood is a legacy repeatability slot, not a new distribution."}
+            path.write_text(json.dumps(payload, indent=2) + "\n")
+            result[name] = load_profile_set(path)
+        return result
     sets = {
         "val": build_validation_set(family),
         "test": build_test_set(family),
@@ -442,7 +555,7 @@ if __name__ == "__main__":  # pragma: no cover
     import argparse
 
     ap = argparse.ArgumentParser(description="Freeze the V / T / O profile sets")
-    ap.add_argument("--family", default="configs/demand.yaml")
+    ap.add_argument("--family", default="configs/scenario.yaml")
     ap.add_argument("--out-dir", default="configs/profiles")
     args = ap.parse_args()
     sets = build_fixed_sets(args.family, args.out_dir)

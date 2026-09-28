@@ -9,6 +9,10 @@ network:
   acceleration_lane_length_m: 100.0
   num_lanes: 1
 simulation:
+  # Discard a 3-minute pre-roll at the first demand values, then reset the
+  # upstream ramp queue before the recorded one-hour horizon.
+  warmup_s: 180
+  warmup_ramp_control: 0.5
   duration_s: 3600
   step_length_s: 1
   dt_ctrl_s: 30
@@ -18,11 +22,22 @@ simulation:
   sumo_extra_args:
   - --extrapolate-departpos
 demand:
-  mainline_demand_vph: 2000
-  ramp_demand_vph: 800
+  mainline_demand_vph: 1250  # initial value; profile_segments defines the full episode
+  ramp_demand_vph: 250       # initial value before metering
   ramp_discharge_vph: 1200
   ramp_model: metered_queue
-  demand_profile: profile
+  # Canonical one-hour demand; rates are veh/h, times are minutes.
+  # Pairs specify linear transitions, sampled at each 30-second interval start.
+  # Explicit study profiles may override this schedule.
+  demand_profile: fixed
+  profile_segments:
+    - {start_min: 0,  end_min: 10, mainline_vph: 1250,         ramp_vph: 250}
+    - {start_min: 10, end_min: 20, mainline_vph: 1600,         ramp_vph: 400}
+    - {start_min: 20, end_min: 25, mainline_vph: [1600, 1800], ramp_vph: [400, 900]}
+    - {start_min: 25, end_min: 40, mainline_vph: 1800,         ramp_vph: 900}
+    - {start_min: 40, end_min: 45, mainline_vph: 1800,         ramp_vph: [900, 300]}
+    - {start_min: 45, end_min: 50, mainline_vph: [1800, 1100], ramp_vph: 300}
+    - {start_min: 50, end_min: 60, mainline_vph: 1100,         ramp_vph: 300}
   ramp_stopline_offset_m: 200.0
   ramp_queue_max_veh: null
 vehicle:

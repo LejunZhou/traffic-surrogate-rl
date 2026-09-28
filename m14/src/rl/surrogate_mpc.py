@@ -62,7 +62,7 @@ class SurrogateMPC:
             self.d = np.asarray(env.mainline_profile, dtype=np.float32)[: self.K]
             self.r = np.asarray(env.ramp_profile, dtype=np.float32)[: self.K]
         self.q_r_hist = np.zeros(self.K, np.float32)
-        self.cum_offered = 0.0; self.cum_served = 0.0
+        self.cum_offered = float(getattr(env, "initial_inventory", 0.0)); self.cum_served = 0.0
         self.z = torch.zeros(self.H)              # logits, u = sigmoid(z); 0 -> u = 0.5
         self.rho_offset = np.zeros(self.Nx, np.float32)
         self.last_pred_rho = None

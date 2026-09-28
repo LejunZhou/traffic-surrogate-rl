@@ -127,14 +127,23 @@ class RolloutStore:
     def density_stats(self, files: list[str]) -> dict:
         if not files:
             return {"mean_density": 0.0, "std_density": 1.0, "mean_outflow_vph": 0.0}
-        dens, outs = [], []
+        dens, outs, initial_dens, initial_inventory, protocols = [], [], [], [], set()
         for fn in files:
             arrays, _ = load_rollout_npz(self.root / fn)
             dens.append(arrays["density"].astype(np.float32).ravel())
             outs.append(arrays["outflow_vph"].astype(np.float32).ravel())
+            initial_dens.append(np.asarray(arrays.get("initial_density", np.zeros(arrays["density"].shape[0])), dtype=float))
+            initial_inventory.append(float(arrays.get("initial_inventory", 0.0)))
+            protocols.add((float(arrays.get("simulation_warmup_s", 0.0)), float(arrays.get("warmup_ramp_control", 0.5))))
+        if len(protocols) != 1:
+            raise ValueError("Cannot mix rollout warmup protocols; generate a fresh dataset")
+        warmup_s, warmup_u = protocols.pop()
         d = np.concatenate(dens); o = np.concatenate(outs)
         return {"mean_density": float(d.mean()), "std_density": float(d.std()),
-                "mean_outflow_vph": float(o.mean())}
+                "mean_outflow_vph": float(o.mean()),
+                "initial_state": {"warmup_s": warmup_s, "warmup_ramp_control": warmup_u,
+                                  "density": np.mean(initial_dens, axis=0).tolist(),
+                                  "inventory": float(np.mean(initial_inventory))}}
 
     def fork(self, new_root: str | Path) -> "RolloutStore":
         """New store that references this store's files (absolute paths) so an

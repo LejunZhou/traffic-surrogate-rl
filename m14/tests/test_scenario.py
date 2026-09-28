@@ -82,3 +82,28 @@ def test_merge_station_density_uses_through_lane_only():
     assert abs(d_main[1] - 40.0) < 1e-3                                             # new rule: through lane only
     with pytest.raises(ValueError):
         density_from_loops(*args, merge_station_lanes="sum")
+
+
+@requires_sumo
+def test_warmup_preserves_road_and_resets_queue(tmp_path):
+    import traci
+
+    env = _env(tmp_path)
+    env.warmup_ramp_control = 0.0
+    try:
+        _, reset_info = env.reset(options={"profile": DemandProfile.constant(1250.0, 250.0)})
+        traci.switch(env._traci_label)
+        assert traci.simulation.getTime() == 180.0
+        assert env.k == 0 and env.T_ctrl == 120
+        assert env.warmup_info["queue_before_reset"] > 0
+        assert env._virtual_queue_length == 0 and not env._ramp_pending_ids
+        assert env._ramp_arrival_accumulator == env._ramp_release_accumulator == 0
+        assert env.initial_density.sum() > 0 and env.initial_inventory > 0
+        assert env._cum_offered == env.initial_inventory and env._cum_served == 0
+        assert reset_info["recording_initial_ramp_queue"] == 0
+        _, _, _, _, info = env.step(np.array([0.0], dtype=np.float32))
+        assert traci.simulation.getTime() == 210.0 and env.k == 1
+        assert 1 <= info["queue_after"] <= 3
+        assert info["mainline_demand_vph"] == 1250.0
+    finally:
+        env.close()

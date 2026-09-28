@@ -13,7 +13,7 @@ from rest. Vehicles waiting before insertion are represented by a virtual queue.
 SUMO runs at one-second resolution. The controller acts every 30 seconds for
 one hour: K=120 actions. Density is estimated from occupancy at 19 detector
 stations, x=100,…,1,900 m. The merge detector measures only the through lane.
-Every episode starts empty. There is no finite queue storage cap.
+Every episode runs a 180-second pre-roll at the initial demand and meter setting u=0.5. There is no finite queue storage cap.
 
 At each control interval, the physical action is u in [0,1]. PPO internally
 uses a symmetric [-1,1] action mapped to u=(a+1)/2. A capacity of uD does not
@@ -31,6 +31,16 @@ SUMO discretizes vehicles and confirms insertions before removing them from
 the virtual queue. The surrogate uses the continuous analytic approximation.
 The learned traffic model includes acceleration and merging after admission at
 the ramp entrance; ramp inflow is not a measurement at the merge nose.
+
+## Fixed demand schedule
+
+`demand.profile_segments` in `configs/scenario.yaml` supplies the exact mainline
+and ramp arrival sequences to every study stage. Scalars are constant segment
+rates and pairs are linear endpoint rates. They are sampled at interval starts,
+then held for 30 seconds; there is no five-minute block averaging or random
+scaling. The ramp peak is 900 veh/h and total peak demand is 2700 veh/h.
+Validation, test, and the legacy `ood` slot use distinct simulator seeds with
+the same demand. The latter is a repeatability set, not out-of-distribution data.
 
 ## DeepONet
 
@@ -150,3 +160,12 @@ exit counts. Final ID/OOD episodes do not count toward training simulation cost.
 
 These details are intentional preservation of the existing implementation, not
 a claim of exact physical integration or exact SUMO/surrogate reward parity.
+
+The scenario specifies a 180-second simulation warmup at the initial demand
+and meter setting `u=0.5`, followed by the full 3600-second recorded schedule.
+At recording start, the upstream ramp queue, pending ramp insertions, and meter
+accumulators are cleared; admitted vehicles remain on the road. Warmup samples
+are excluded from recorded trajectories and metrics. The existing 90-second
+reward mask remains separate. Rollouts save initial density and vehicle inventory.
+Surrogate resets use the training-set mean initial state, saved in checkpoints;
+data and checkpoints from a different warmup protocol must be regenerated.

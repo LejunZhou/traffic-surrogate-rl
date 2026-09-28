@@ -114,6 +114,13 @@ class SumoEnv(gym.Env):
         self.duration_s = float(sim_cfg["duration_s"])
         self.T_ctrl = int(self.duration_s / self.dt_ctrl)
         self.warmup_s = float(sim_cfg.get("ramp_warmup_s", 0.0))
+        self.simulation_warmup_s = float(sim_cfg.get("warmup_s", 0.0))
+        self.warmup_ramp_control = float(sim_cfg.get("warmup_ramp_control", 0.5))
+        if (not np.isfinite(self.simulation_warmup_s) or self.simulation_warmup_s < 0
+                or not np.isclose(self.simulation_warmup_s / self.dt_ctrl, round(self.simulation_warmup_s / self.dt_ctrl))):
+            raise ValueError("simulation.warmup_s must be a nonnegative multiple of dt_ctrl_s")
+        if not 0 <= self.warmup_ramp_control <= 1:
+            raise ValueError("simulation.warmup_ramp_control must be in [0, 1]")
         self.base_seed = int(sim_cfg.get("seed", self.env_config.get("seed", 42)))
         self.sumo_binary = str(self.env_config.get("sumo_binary", sim_cfg["sumo_binary"]))
         # SUMO --max-depart-delay (seconds). Vehicles that cannot be inserted
@@ -443,8 +450,40 @@ class SumoEnv(gym.Env):
         self._cum_served = 0.0
         self._reset_insertion_bookkeeping()
 
+        self.warmup_info = {}
+        for _ in range(int(round(self.simulation_warmup_s / self.dt_ctrl))):
+            self.current_density, _, _, _ = self._advance_control_interval(
+                self.warmup_ramp_control, float(self.ramp_profile[0]))
+        self.warmup_info = {
+            "queue_before_reset": float(self._virtual_queue_length),
+            "pending_ramp_before_reset": len(self._ramp_pending_ids),
+            "teleports": self._teleports,
+        }
+        for veh_id in sorted(self._ramp_pending_ids):
+            traci.vehicle.remove(veh_id)
+        # Keep admitted traffic, density, and the vehicle ID counter. Reset
+        # upstream queue, meter phases, and all recorded-horizon diagnostics.
+        self._virtual_queue_length = 0.0
+        self._ramp_arrival_accumulator = self._ramp_release_accumulator = 0.0
+        self._insert_attempts = self._insert_success = self._insert_rejected = 0
+        self._teleports = self._arrived_vehicles = 0
+        self._queue_samples = []; self._physical_ramp_samples = []
+        self._reset_insertion_bookkeeping()
+        self._prev_pending = set(traci.simulation.getPendingVehicles())
+        pending_main = sum(not v.startswith("ramp_") for v in self._prev_pending)
+        self.initial_density = self.current_density.copy()
+        self.initial_inventory = float(traci.vehicle.getIDCount() + pending_main)
+        # Include traffic already present in conservation accounting, but not
+        # in recorded-horizon demand, throughput, or travel-time counters.
+        self._cum_offered = self.initial_inventory
+        self._cum_served = 0.0
         obs = self._make_observation()
         info = {
+            "simulation_warmup_s": self.simulation_warmup_s,
+            "recording_initial_ramp_queue": 0.0,
+            "initial_inventory": self.initial_inventory,
+            "cum_offered_veh": self._cum_offered,
+            "cum_served_veh": 0.0,
             "demand_vph": self.current_demand_vph,
             "ramp_demand_vph": self.current_ramp_demand_vph,
             "mainline_demand_vph": float(self.mainline_profile[0]),

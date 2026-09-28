@@ -71,7 +71,9 @@ def _make_synthetic_store(root: Path, n: int = 6, seed: int = 0) -> Path:
         dens = np.zeros((NX, K), np.float32)
         for k in range(K):
             dens[:, k] = np.clip(inflow[max(k - 2, 0)] / 110.0 + 0.002 * inflow[:k + 1].sum() / (k + 1) - 20, 5, 140)
-        arrays = {"density": dens, "speed": np.full((NX, K), 100.0, np.float32), "flow": np.tile(inflow, (NX, 1)).astype(np.float32),
+        arrays = {"initial_density": np.full(NX, 10.0, np.float32), "initial_inventory": np.array(19.0),
+                  "simulation_warmup_s": np.array(180.0), "warmup_ramp_control": np.array(0.5),
+                  "density": dens, "speed": np.full((NX, K), 100.0, np.float32), "flow": np.tile(inflow, (NX, 1)).astype(np.float32),
                   "outflow_vph": np.roll(inflow, 2).astype(np.float32), "mainline_demand": d, "ramp_arrival": qr,
                   "ramp_inflow_vph": qr, "ramp_queue": np.zeros(K, np.float32), "pending_mainline": np.zeros(K, np.float32),
                   "action": np.full(K, 0.5, np.float32), "reward": -np.ones(K, np.float32), "q_ref": np.full(K, 2476.0, np.float32),
@@ -180,6 +182,8 @@ def test_vec_env_contract(tiny_ensemble):
     env = SurrogateVecEnv(cfg)
     obs = env.reset()
     assert obs.shape == (4, NX + 4) and env.action_space.low[0] == -1.0
+    assert np.all(env.density == 10.0)
+    assert env.initial_inventory == 19.0
     total = np.zeros(4)
     for k in range(K):
         obs, rew, done, infos = env.step(np.zeros((4, 1), np.float32))   # a = 0 -> u = 0.5
@@ -262,7 +266,7 @@ def test_sumo_and_surrogate_env_parity(tiny_ensemble, tmp_path):
     obs_s, _ = sumo.reset(options={"profile": p, "sumo_seed": 1})
     vec.set_profiles([p]); obs_v = vec.reset()[0]
     assert obs_s.shape == obs_v.shape == (NX + 4 + 4,)
-    # identical demand / look-ahead / time / queue features at reset (densities are 0 in both)
+    # identical demand / look-ahead / time / queue features at reset (density uses the warmed state in each backend)
     assert np.allclose(obs_s[NX:], obs_v[NX:])
     try:
         for k in range(4):

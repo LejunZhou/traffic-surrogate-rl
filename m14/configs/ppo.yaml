@@ -2,7 +2,7 @@
 env:
   sumo_config: configs/scenario.yaml
   profiles:
-    family: configs/demand.yaml
+    family: configs/scenario.yaml
   observation:
     lookahead_steps: 0
     demand_norm: 2500.0

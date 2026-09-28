@@ -152,3 +152,27 @@ work, not measured end-to-end elapsed training time. Use `runs/commands.jsonl`
 for measured stage elapsed time; nested or concurrently running stages must
 not be blindly summed. The historical comparison figures report return.
 For TTS comparisons, use episode-level `tts_veh_h`, matching profile and SUMO seed.
+
+## User-defined demand across the study
+
+Edit `configs/scenario.yaml` → `demand.profile_segments` to change the schedule.
+`configs/dataset.yaml` and `configs/ppo.yaml` select that same scenario as their
+profile source. Evaluation JSONs specify only the scenario path, repetition
+counts, and disjoint SUMO-seed ranges: validation 10000–10017, test 20000–20089,
+and fixed repeats 30000–30035. The old `ood` slot is retained for CLI compatibility.
+`python run.py simulate` uses the fixed validation profile; `--set test` and
+`--set ood` use the same demand with the corresponding seed set (the single-run
+`--seed` option still controls the actual simulator seed).
+
+Run the usual `python run.py data` or `python run.py pipeline` in a fresh output
+workspace; existing data/models from the historical random-demand study must
+be kept separate. This code change does not retrain or rewrite saved results.
+
+The scenario specifies a 180-second simulation warmup at the initial demand
+and meter setting `u=0.5`, followed by the full 3600-second recorded schedule.
+At recording start, the upstream ramp queue, pending ramp insertions, and meter
+accumulators are cleared; admitted vehicles remain on the road. Warmup samples
+are excluded from recorded trajectories and metrics. The existing 90-second
+reward mask remains separate. Rollouts save initial density and vehicle inventory.
+Surrogate resets use the training-set mean initial state, saved in checkpoints;
+data and checkpoints from a different warmup protocol must be regenerated.

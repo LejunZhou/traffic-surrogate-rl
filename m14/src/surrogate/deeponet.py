@@ -122,21 +122,22 @@ class PlantNormalisation:
     """Scales shared by the dataset, trainer, environment and evaluation."""
 
     def __init__(self, density_mean: float, density_std: float, demand_scale: float = 2500.0,
-                 inflow_scale: float = 1600.0, flow_scale: float = 2500.0) -> None:
+                 inflow_scale: float = 1600.0, flow_scale: float = 2500.0, initial_state: dict | None = None) -> None:
         self.density_mean = float(density_mean)
         self.density_std = max(float(density_std), 1e-6)
         self.demand_scale = float(demand_scale)
         self.inflow_scale = float(inflow_scale)
         self.flow_scale = float(flow_scale)
+        self.initial_state = dict(initial_state or {})
 
     def to_dict(self) -> dict:
         return {"mean_density": self.density_mean, "std_density": self.density_std,
-                "demand_scale": self.demand_scale, "inflow_scale": self.inflow_scale, "flow_scale": self.flow_scale}
+                "demand_scale": self.demand_scale, "inflow_scale": self.inflow_scale, "flow_scale": self.flow_scale, "initial_state": self.initial_state}
 
     @classmethod
     def from_dict(cls, d: dict) -> "PlantNormalisation":
         return cls(d["mean_density"], d["std_density"], d.get("demand_scale", 2500.0),
-                   d.get("inflow_scale", 1600.0), d.get("flow_scale", 2500.0))
+                   d.get("inflow_scale", 1600.0), d.get("flow_scale", 2500.0), d.get("initial_state"))
 
     def branch_input(self, mainline_vph, ramp_inflow_vph) -> _np.ndarray:
         return _np.stack([_np.asarray(mainline_vph, dtype=_np.float32) / self.demand_scale,

@@ -59,11 +59,11 @@ def test_routes_xml_one_flow_per_block(tmp_path):
     out = tmp_path / "routes.rou.xml"
     _write_routes(out, cfg, p.mainline_flow_blocks())
     txt = out.read_text()
-    assert txt.count("<flow ") == 12
-    assert 'begin="300" end="600"' in txt
+    assert txt.count("<flow ") == 13
+    assert 'begin="480" end="780"' in txt
     assert 'departSpeed="desired"' in txt
     _write_routes(out, cfg)
-    assert out.read_text().count("<flow ") == 1
+    assert out.read_text().count("<flow ") == 2
 
 
 def test_frozen_sets_load_and_match_sampler():
@@ -72,10 +72,12 @@ def test_frozen_sets_load_and_match_sampler():
     ood = load_profile_set(ROOT / "configs/profiles/ood.json")
     assert len(val) == 18 and len(test) == 30 and len(ood) == 12
     assert all(len(p.sumo_seeds) == 1 for p in val) and all(len(p.sumo_seeds) == 3 for p in test)
-    fam = ProfileFamily.load(FAMILY)
+    fam = ProfileFamily.load(ROOT / "configs/scenario.yaml")
     regenerated = fam.sample_by_key("test", 7)
     assert np.allclose(regenerated.mainline_blocks, test[7].mainline_blocks)
-    assert {p.params["ood"] for p in ood} == {"double", "plateau", "early_surge"}
+    assert all(p.params["evaluation_kind"] == "fixed_schedule" for p in ood)
+    all_seeds = [seed for group in (val, test, ood) for p in group for seed in p.sumo_seeds]
+    assert len(all_seeds) == len(set(all_seeds))
 
 
 def test_roundtrip_dict():
@@ -103,3 +105,45 @@ def test_m14_demand_constraints():
     for i in range(30):
         p = fam.sample_ood(fam.rng_for("ood", i), ["double", "plateau", "early_surge"][i % 3], "ood", i)
         assert p.ramp_blocks.max() <= 800.0 + 1e-3
+
+
+def test_entire_study_reads_exact_scenario_schedule(tmp_path):
+    from sumo_env.demand_profiles import build_fixed_sets
+    scenario_path = ROOT / 'configs/scenario.yaml'
+    family = ProfileFamily.load(scenario_path)
+    assert family.is_fixed
+    p = family.sample_by_key('train', 0)
+    assert p.block_min == .5 and p.K == 120
+    expected_main = np.r_[np.full(20,1250), np.full(20,1600), np.arange(1600,1800,20),
+                          np.full(40,1800), np.arange(1800,1100,-70), np.full(20,1100)]
+    expected_ramp = np.r_[np.full(20,250), np.full(20,400), np.arange(400,900,50),
+                          np.full(30,900), np.arange(900,300,-60), np.full(30,300)]
+    for set_name in ('train', 'e0', 'tune', 'agg', 'val', 'test', 'ood'):
+        for i in (0, 11):
+            profile = family.sample_by_key(set_name, i)
+            np.testing.assert_array_equal(profile.mainline_vph, expected_main)
+            np.testing.assert_array_equal(profile.ramp_vph, expected_ramp)
+    assert p.params['storage_window_min'] == [20, 45]
+    for cfg_name in ('dataset', 'ppo'):
+        cfg = yaml.safe_load((ROOT / f'configs/{cfg_name}.yaml').read_text())
+        assert cfg['env']['profiles']['family'] == 'configs/scenario.yaml'
+    generated = build_fixed_sets(scenario_path, tmp_path/'sets')
+    for name in ('val', 'test', 'ood'):
+        actual = load_profile_set(ROOT / f'configs/profiles/{name}.json')
+        assert len(generated[name]) == len(actual)
+        for a, b in zip(generated[name], actual):
+            np.testing.assert_array_equal(a.mainline_vph, expected_main)
+            np.testing.assert_array_equal(a.ramp_vph, expected_ramp)
+            assert a.sumo_seeds == b.sumo_seeds
+
+
+def test_scenario_edits_propagate_to_evaluation_without_regeneration(tmp_path):
+    import json
+    cfg = yaml.safe_load((ROOT / 'configs/scenario.yaml').read_text())
+    cfg['demand']['profile_segments'][0]['mainline_vph'] = 1400
+    (tmp_path/'scenario.yaml').write_text(yaml.safe_dump(cfg))
+    path = tmp_path/'test.json'
+    path.write_text(json.dumps(dict(scenario='scenario.yaml', set='test', n=1, seeds_per_profile=3, seed_base=20000)))
+    p = load_profile_set(path)[0]
+    np.testing.assert_array_equal(p.mainline_vph[:20], 1400)
+    assert p.sumo_seeds == [20000, 20001, 20002]

@@ -1,0 +1,9 @@
+# M14 warmup progress
+
+Implemented the shared scenario simulation.warmup_s=180 and warmup_ramp_control=0.5. Native SUMO resets hold the first demand values during pre-roll, shift all mainline schedule intervals by 180 seconds, retain admitted road traffic, and clear upstream ramp queue, pending ramp insertions, and fractional meter accumulators before the recorded hour. Warmup counters are excluded from recorded metrics. The existing 90-second reward mask remains unchanged.
+
+Rollouts save initial_density, initial_inventory, simulation_warmup_s, warmup_ramp_control, and recording_initial_ramp_queue. Conservation accounting, rescoring, and MPC include the initial inventory. Dataset training statistics retain the mean initial state; surrogate resets use this mean state. Checkpoints persist the protocol and reject incompatible scenario warmup settings. This mean is an approximation of seed-specific SUMO initial states. Root dataset generation reads warmup defaults from the M14 scenario.
+
+Validation: the complete existing M14 suite passed (93 tests); after adding the dedicated warmup regression and initial-state assertions, the affected scenario and surrogate suites passed (18 tests). The root generator/demand/queue suites passed (27 tests). git diff --check passed. A full native rollout at u=0.5, seed 10000, saved to /private/tmp/m14-warmup-check/rollout.npz, had zero teleports, 19x120 density, exact fixed demands, initial_inventory=25, and recording_initial_ramp_queue=0. The targeted real SUMO reset test confirms simulation time 180 at recording start, nonempty road state, discarded pre-roll queue, and time 210 after the first recorded step. Local SUMO is 1.20.0; these are integration checks, not paper results under pinned SUMO 1.27.1.
+
+No production dataset generation or study retraining was launched. Existing data and checkpoints must be regenerated for the warmup protocol. Changes remain uncommitted.

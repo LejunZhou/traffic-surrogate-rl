@@ -121,10 +121,17 @@ def rollout_episode(env, controller, reset_options: dict | None = None, determin
     """
     t0 = time.time()
     obs, info = env.reset(options=reset_options or {})
+    initial_density = np.asarray(getattr(env, "initial_density", np.zeros(env.N_x)), dtype=np.float32).copy()
+    initial_inventory = float(getattr(env, "initial_inventory", 0.0))
     _reset_controller(controller, env)
     K = env.T_ctrl
     N_x = env.N_x
     arr = {
+        "initial_density": initial_density,
+        "initial_inventory": np.array(initial_inventory),
+        "simulation_warmup_s": np.array(float(getattr(env, "simulation_warmup_s", 0.0))),
+        "warmup_ramp_control": np.array(float(getattr(env, "warmup_ramp_control", 0.5))),
+        "recording_initial_ramp_queue": np.array(0.0),
         "density": np.zeros((N_x, K), np.float32),
         "speed": np.zeros((N_x, K), np.float32),
         "flow": np.zeros((N_x, K), np.float32),
@@ -211,7 +218,8 @@ def rescore_return(arrays: dict, weights, dt_ctrl_s: float = 30.0, warmup_s: flo
     K = dens.shape[1]
     dt_h = dt_ctrl_s / 3600.0
     warm_steps = int(round(warmup_s / dt_ctrl_s))
-    cum_off = cum_srv = 0.0
+    cum_off = float(arrays.get("initial_inventory", 0.0))
+    cum_srv = 0.0
     total = 0.0; parts = {"outflow_penalty": 0.0, "queue_penalty": 0.0, "std_penalty": 0.0, "tts_penalty": 0.0, "terminal_penalty": 0.0}
     for k in range(K):
         cum_off += (d[k] + r[k]) * dt_h; cum_srv += max(out[k], 0.0) * dt_h

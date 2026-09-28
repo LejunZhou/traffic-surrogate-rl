@@ -58,7 +58,9 @@ def store_and_flush_schedule(
     mp = profile.params.get("mainline", {})
     rp = profile.params.get("ramp", {})
     fam = mp.get("family")
-    if fam in ("peak", "double"):
+    if "storage_window_min" in profile.params:
+        t0, t1 = profile.params["storage_window_min"]
+    elif fam in ("peak", "double"):
         tc, w = float(mp["t_center"]), float(mp["half_width"])
         t0, t1 = tc - w, tc + w
     elif fam in ("step", "plateau"):

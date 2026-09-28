@@ -198,6 +198,10 @@ def generate_dataset(
     ds = ds_config["dataset"]
     profile_specs = ds.get("demand_profiles", {})
     profile_family = ds.get("demand_profile_family")
+    scenario_segments = base_sumo_config["demand"].get("profile_segments")
+    if scenario_segments and not profile_specs:
+        profile_family = {"type": "scaled_template", "segments": scenario_segments,
+                          **(profile_family or {})}
     if set(profile_specs) - {"mainline", "ramp"}:
         raise ValueError("dataset.demand_profiles supports only mainline and ramp")
     if profile_specs and profile_family:
@@ -227,8 +231,8 @@ def generate_dataset(
 
     sim_cfg = base_sumo_config["simulation"]
     T_ctrl = int(sim_cfg["duration_s"] / sim_cfg["dt_ctrl_s"])
-    warmup_s = float(ds.get("warmup_s", 0.0))
-    warmup_ramp_control = float(ds.get("warmup_ramp_control", 0.5))
+    warmup_s = float(ds.get("warmup_s", sim_cfg.get("warmup_s", 0.0)))
+    warmup_ramp_control = float(ds.get("warmup_ramp_control", sim_cfg.get("warmup_ramp_control", 0.5)))
 
     # Build network topology + detectors once (reused across all runs).
     # Routes will be rebuilt per demand level.
@@ -359,6 +363,7 @@ def generate_dataset(
             ramp_model=np.array(result["metadata"]["ramp_model"]),
             ramp_ref_vph=np.array(result["metadata"]["ramp_ref_vph"]),
             ramp_discharge_vph=np.array(result["metadata"]["ramp_discharge_vph"]),
+            recording_initial_ramp_queue=np.array(result["metadata"]["recording_initial_ramp_queue"]),
             warmup_s=np.array(result["metadata"]["warmup_s"]),
             warmup_ramp_control=np.array(
                 result["metadata"]["warmup_ramp_control"]

@@ -5,6 +5,22 @@ A self-contained implementation of the **M14 v3b study**, now configured for the
 one mainline through lane, a causal GRU DeepONet ensemble, and PPO trained
 with iterative SUMO validation and data aggregation.
 
+**Current demand setting:** the user-defined seven-segment schedule in
+[`configs/scenario.yaml`](configs/scenario.yaml) now drives the entire study:
+E0, data collection, PPO training, aggregation, baseline tuning, and evaluation.
+Linear transitions are sampled every 30 seconds; all episodes use the exact
+schedule (no demand scaling). Simulation seeds and controller actions vary.
+Validation/test descriptors reference that YAML directly, so schedule edits
+propagate without regenerating profile arrays. `configs/demand.yaml` retains
+the historical random family for explicit legacy experiments.
+
+The `ood` filename remains for command compatibility and now selects independent
+SUMO-seed repeats of the same schedule. Reports label it **Fixed repeat**;
+these runs do not measure generalization to a different demand distribution.
+Use fresh data/checkpoints for this setting; historical saved scores describe
+the previous demand family. The native M14 environments start with zero queue.
+The root fixed-dataset generator reads the same warmup settings from the scenario.
+
 Start here rather than navigating the older milestone scripts. The folder can
 be copied to another location without the parent repository. It contains code,
 configuration, frozen demand profiles, and tests; generated data and models go
@@ -104,7 +120,7 @@ integration diagnostics, not research results.
 | Concern | Start here |
 |---|---|
 | Road, simulator timing, discharge capacity | [configs/scenario.yaml](configs/scenario.yaml) |
-| Demand distribution and frozen evaluation sets | [configs/demand.yaml](configs/demand.yaml), `configs/profiles/` |
+| Demand schedule and evaluation seeds | [configs/scenario.yaml](configs/scenario.yaml), `configs/profiles/` |
 | Initial trajectory mixture | [configs/dataset.yaml](configs/dataset.yaml) |
 | DeepONet architecture and optimizer | [configs/deeponet.yaml](configs/deeponet.yaml) |
 | PPO, observation, reward, shared meter settings | [configs/ppo.yaml](configs/ppo.yaml) |
@@ -117,3 +133,12 @@ are different quantities; existing return plots label their metric explicitly.
 The historical M14 Windows checkpoints/evaluations were unavailable when this
 folder was created. This package provides a runnable workflow, not a bundled
 reproduction of those saved results.
+
+The scenario specifies a 180-second simulation warmup at the initial demand
+and meter setting `u=0.5`, followed by the full 3600-second recorded schedule.
+At recording start, the upstream ramp queue, pending ramp insertions, and meter
+accumulators are cleared; admitted vehicles remain on the road. Warmup samples
+are excluded from recorded trajectories and metrics. The existing 90-second
+reward mask remains separate. Rollouts save initial density and vehicle inventory.
+Surrogate resets use the training-set mean initial state, saved in checkpoints;
+data and checkpoints from a different warmup protocol must be regenerated.

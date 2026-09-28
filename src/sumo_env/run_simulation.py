@@ -39,6 +39,7 @@ from sumo_env.detectors import (
     get_detector_ids,
     get_detector_ids_per_lane,
     get_x_grid,
+    density_from_loops,
 )
 from sumo_env.ramp_queue import MeteredRampQueue
 from sumo_env.demand_profiles import scenario_demands
@@ -152,6 +153,7 @@ def run_simulation(
         sumo_cmd += ["--max-depart-delay", str(max_depart_delay_s)]
     sumo_cmd += [str(a) for a in (sim_cfg.get("sumo_extra_args") or [])]
 
+    ramp_depart_pos = "free"
     veh_counter = 0          # global ramp vehicle ID counter
     frac_accumulator = 0.0   # fractional carry-forward for ramp insertion (open loop)
     meter = (
@@ -209,7 +211,7 @@ def run_simulation(
                     typeID="passenger",
                     depart=str(traci.simulation.getTime()),
                     departLane="first",
-                    departPos="free",
+                    departPos=ramp_depart_pos,
                     departSpeed="0",
                 )
                 veh_counter += 1
@@ -225,8 +227,7 @@ def run_simulation(
         arrived = traci.simulation.getArrivedNumber()
 
         # add() only accepts a request; confirmed departures are the entries
-        # onto the road. A request made during warm-up can legitimately remain
-        # pending into the recorded horizon.
+        # onto the road. Pending requests are tracked until confirmed or removed.
         departed_ids = set(traci.simulation.getDepartedIDList())
         pending_ids = set(traci.simulation.getPendingVehicles())
         ramp_departed = ramp_pending_ids & departed_ids
@@ -242,6 +243,10 @@ def run_simulation(
 
     try:
         traci.start(sumo_cmd)
+        stopline_offset = float(demand_cfg.get("ramp_stopline_offset_m", 0.0) or 0.0)
+        if stopline_offset > 0:
+            ramp_length = float(traci.lane.getLength("ramp_0"))
+            ramp_depart_pos = f"{max(ramp_length - stopline_offset, 0.0):.2f}"
 
         # True pre-roll: hold the episode's initial demands and a fixed meter
         # command, but do not aggregate detector data into the learning arrays.
@@ -267,8 +272,17 @@ def run_simulation(
             ),
         }
 
+        # Start recording with an empty upstream queue. Cancel requests that
+        # have not entered SUMO so warmup vehicles cannot appear as new inflow.
+        # Already admitted vehicles retain their physical road state.
+        for veh_id in sorted(ramp_pending_ids):
+            traci.vehicle.remove(veh_id)
+        ramp_pending_ids.clear()
+        if meter is not None:
+            meter = MeteredRampQueue(float(ramp_demand[0]), ramp_discharge_vph, step_len)
+        frac_accumulator = 0.0
+
         # The public counters and queue samples describe only the saved horizon.
-        # Physical and virtual vehicle state intentionally carries across.
         total_insert_attempts = 0
         total_insert_success = 0
         total_insert_rejected = 0
@@ -281,7 +295,7 @@ def run_simulation(
             sum_count = np.zeros(N_x, dtype=np.float64)
             sum_speed = np.zeros(N_x, dtype=np.float64)
             speed_count = np.zeros(N_x, dtype=np.int32)
-            sum_occ = np.zeros(N_x, dtype=np.float64)
+            sum_occ_per_lane = [np.zeros(len(ids), dtype=np.float64) for ids in det_ids_per_lane]
 
             departed_k = 0
             arrived_k = 0
@@ -297,41 +311,26 @@ def run_simulation(
                 # --- Read detector values for this step ---
                 # Aggregate across lanes at each spatial position.
                 for j, lane_ids in enumerate(det_ids_per_lane):
-                    for det_id in lane_ids:
+                    for lane, det_id in enumerate(lane_ids):
                         count = traci.inductionloop.getLastStepVehicleNumber(det_id)
                         spd_raw = traci.inductionloop.getLastStepMeanSpeed(det_id)  # m/s or -1
                         occ = traci.inductionloop.getLastStepOccupancy(det_id)      # %
 
                         sum_count[j] += count
-                        sum_occ[j] += occ
+                        sum_occ_per_lane[j][lane] += occ
                         if spd_raw >= 0.0:
                             sum_speed[j] += spd_raw * count  # count-weighted for averaging
                             speed_count[j] += count
 
-            # --- Aggregate over control interval ---
-            flow_vph = sum_count / (dt_ctrl_steps * step_len) * 3600.0  # veh/hr
-
-            mean_speed_mps = np.where(
-                speed_count > 0,
-                sum_speed / np.maximum(speed_count, 1),
-                0.0,
+            # Share the estimator with the SUMO RL environment so the scenario's
+            # density method, lane selection, and jam-density limit all apply.
+            density[:, k], speed[:, k], flow[:, k] = density_from_loops(
+                sum_count, sum_speed, speed_count, sum_occ_per_lane,
+                dt_ctrl_steps, step_len, str(det_cfg.get("density_method", "qv")).lower(),
+                veh_len, float(det_cfg.get("occupancy_effective_length_m", veh_len)),
+                float(det_cfg.get("jam_density_veh_km", 1000.0 / (veh_len + float(config.get("vehicle", {}).get("min_gap_m", 2.0))))),
+                merge_station_lanes=str(det_cfg.get("merge_station_lanes", "mean")).lower(),
             )
-            mean_speed_kmph = mean_speed_mps * 3.6
-
-            # Primary: fundamental relation ρ = q / v
-            # Fallback: occupancy-based when speed < 5 km/h
-            mean_occ_frac = sum_occ / (dt_ctrl_steps * 100.0)
-            density_occ = mean_occ_frac * (1000.0 / veh_len)
-
-            density_fd = np.where(
-                mean_speed_kmph > 5.0,
-                flow_vph / np.maximum(mean_speed_kmph, 1e-6),
-                density_occ,
-            )
-
-            density[:, k] = density_fd.astype(np.float32)
-            speed[:, k] = mean_speed_kmph.astype(np.float32)
-            flow[:, k] = flow_vph.astype(np.float32)
             ramp_departed_count[k] = departed_k
             ramp_pending_count[k] = len(ramp_pending_ids)
             ramp_inflow_vph[k] = departed_k * 3600.0 / dt_ctrl
@@ -396,6 +395,7 @@ def run_simulation(
             "ramp_discarded_total": total_ramp_discarded,
             "teleports": total_teleports,
             "ramp_warmup_s": ramp_warmup_s,
+            "recording_initial_ramp_queue": 0.0,
             "warmup_s": warmup_s,
             "warmup_ramp_control": warmup_ramp_control,
             "warmup_mainline_demand_vph": float(mainline_demand[0]),

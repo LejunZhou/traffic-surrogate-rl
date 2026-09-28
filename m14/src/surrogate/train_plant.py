@@ -122,7 +122,14 @@ def train_member(config: dict, member: int, bootstrap_seed: int | None, out_dir:
     else:
         md = split["metadata"]
         norm = PlantNormalisation(md["mean_density"], md["std_density"], float(n_cfg.get("mainline_demand", 2500.0)),
-                                  float(n_cfg.get("ramp_inflow", 1600.0)), float(n_cfg.get("flow", 2500.0)))
+                                  float(n_cfg.get("ramp_inflow", 1600.0)), float(n_cfg.get("flow", 2500.0)), md.get("initial_state"))
+
+    expected_warmup = float(sumo_cfg["simulation"].get("warmup_s", 0.0))
+    expected_u = float(sumo_cfg["simulation"].get("warmup_ramp_control", 0.5))
+    for state in (norm.initial_state, split["metadata"].get("initial_state", {})):
+        if (float(state.get("warmup_s", 0.0)) != expected_warmup
+                or float(state.get("warmup_ramp_control", 0.5)) != expected_u):
+            raise ValueError("Dataset/checkpoint warmup does not match scenario; regenerate data and retrain")
 
     # ---- files: bootstrap resample of the round-0 train split (+ new rounds on fine-tune)
     round_of = {e["file"]: int(e["round"]) for e in index}

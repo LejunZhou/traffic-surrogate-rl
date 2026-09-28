@@ -21,7 +21,8 @@ def test_acc_reference_demand_profile_and_scaled_family():
     cfg = yaml.safe_load(
         (ROOT / "configs/experiments/dataset_time_varying.yaml").read_text()
     )
-    spec = cfg["dataset"]["demand_profile_family"]
+    scenario = yaml.safe_load((ROOT / cfg["base_sumo_config"]).read_text())
+    spec = {**cfg["dataset"]["demand_profile_family"], "segments": scenario["demand"]["profile_segments"]}
     nominal_main, nominal_ramp = sample_joint_demand_profile(
         spec, 120, 30, np.random.default_rng(42), sample_index=0
     )

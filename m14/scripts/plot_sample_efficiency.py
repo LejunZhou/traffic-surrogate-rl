@@ -192,7 +192,7 @@ def fig_ood(arms: list[dict], out: Path) -> None:
     y = np.arange(len(names)); means = np.array(means); los = np.array(los); his = np.array(his)
     ax.barh(y, means, xerr=[means - los, his - means], color=cols, height=0.6, capsize=3, error_kw={"lw": 1, "ecolor": MUTED})
     ax.set_yticks(y); ax.set_yticklabels(names); ax.invert_yaxis(); ax.grid(axis="y", visible=False)
-    ax.set_xlabel("return on the OOD set O (mean, 95 % CI)"); ax.set_title("OOD: selected controllers\nA1: best validation; direct PPO: largest available requested budget", loc="left", fontsize=9)
+    ax.set_xlabel("return on fixed-schedule repeat set (mean, 95 % CI)"); ax.set_title("Fixed-schedule repeats: selected controllers\nA1: best validation; direct PPO: largest available requested budget", loc="left", fontsize=9)
     fig.tight_layout(); fig.savefig(out); fig.savefig(out.with_suffix(".pdf")); plt.close(fig)
 
 

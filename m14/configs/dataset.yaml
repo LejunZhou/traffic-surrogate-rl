@@ -2,7 +2,7 @@
 env:
   sumo_config: configs/scenario.yaml
   profiles:
-    family: configs/demand.yaml
+    family: configs/scenario.yaml
   density_mean: 20.0
   density_std: 12.0
   queue_norm_scale: 100.0

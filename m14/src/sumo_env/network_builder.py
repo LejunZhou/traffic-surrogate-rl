@@ -307,10 +307,17 @@ def _write_routes(path: Path, config: dict, mainline_blocks: list[tuple[float, f
         blocks = [(0.0, float(duration), float(vph))]
     else:
         blocks = [(float(b), float(e), float(v)) for b, e, v in mainline_blocks]
+    warmup_s = float(sim_cfg.get("warmup_s", 0.0))
+    if not math.isfinite(warmup_s) or warmup_s < 0:
+        raise ValueError("simulation.warmup_s must be finite and nonnegative")
+    if warmup_s and blocks:
+        blocks = [(0.0, warmup_s, blocks[0][2])] + [
+            (begin + warmup_s, end + warmup_s, rate) for begin, end, rate in blocks
+        ]
     for i, (begin, end, block_vph) in enumerate(blocks):
         if block_vph <= 0.0:
             continue
-        flow_id = "mainline_flow" if mainline_blocks is None else f"mainline_flow_{i:02d}"
+        flow_id = "mainline_flow" if len(blocks) == 1 else f"mainline_flow_{i:02d}"
         content += (
             f'    <flow id="{flow_id}"\n'
             '          type="passenger"\n'

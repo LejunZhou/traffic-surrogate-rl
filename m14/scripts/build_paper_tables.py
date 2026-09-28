@@ -191,7 +191,7 @@ def headline(episode_rows: dict, sets: tuple[str, ...]) -> dict:
 
 
 def _markdown(t1: dict | None, t2: dict, head: dict, sets: tuple[str, ...]) -> str:
-    lines = []
+    lines = ["All sets use the fixed scenario schedule. The legacy `ood` slot uses independent SUMO seeds; it is not an out-of-distribution demand test.", ""]
     if t1:
         lines += ["## Table I: DeepONet prediction accuracy", f"ensemble `{t1['ensemble']}`", "",
                   "| Metric | Validation | Test |", "|---|---|---|"]
@@ -199,7 +199,7 @@ def _markdown(t1: dict | None, t2: dict, head: dict, sets: tuple[str, ...]) -> s
             lines.append(f"| {label} | {t1['splits']['val'][key]:.2f} | {t1['splits']['test'][key]:.2f} |")
         lines.append(f"| trajectories | {t1['splits']['val']['n']} | {t1['splits']['test']['n']} |")
         lines.append("")
-    set_label = {"test": "ID", "ood": "OOD"}
+    set_label = {"test": "Fixed test", "ood": "Fixed repeat"}
     cols = " | ".join(f"{set_label.get(s, s)} TTS | {set_label.get(s, s)} mean q | {set_label.get(s, s)} max q | "
                       f"{set_label.get(s, s)} trips" for s in sets)
     lines += ["## Table II: controller comparison", "",
@@ -297,6 +297,7 @@ def _markdown_seeds(summary: dict, sets: tuple[str, ...]) -> str:
     lines = [f"# Tables over policy seeds {', '.join(map(str, seeds))}", "",
              "Mean ± standard deviation over seeds (no ± = the same in every seed, e.g. the tuned baselines). "
              "Per-seed tables: `seed_<s>/tables.md`.", ""]
+    lines += ["All sets use the fixed scenario schedule; the legacy `ood` slot measures repeatability with independent SUMO seeds.", ""]
     if summary["table1"]:
         t1 = summary["table1"]
         lines += ["## Table I: DeepONet prediction accuracy (each seed's final ensemble)", "",
@@ -304,7 +305,7 @@ def _markdown_seeds(summary: dict, sets: tuple[str, ...]) -> str:
         for label, key, _ in TABLE1_METRICS:
             lines.append(f"| {label} | {_pm(t1['val'][key])} | {_pm(t1['test'][key])} |")
         lines += [f"| trajectories | {'/'.join(map(str, t1['val']['n']))} | {'/'.join(map(str, t1['test']['n']))} |", ""]
-    set_label = {"test": "ID", "ood": "OOD"}
+    set_label = {"test": "Fixed test", "ood": "Fixed repeat"}
     cols = " | ".join(f"{set_label.get(s, s)} TTS | {set_label.get(s, s)} mean q | {set_label.get(s, s)} max q" for s in sets)
     lines += ["## Table II: controller comparison", "", f"| Method | {cols} | SUMO episodes | compute (h) |",
               "|---|" + "---|" * (3 * len(sets) + 2)]
@@ -329,8 +330,9 @@ def _markdown_seeds(summary: dict, sets: tuple[str, ...]) -> str:
 
 def _latex_rows_seeds(summary: dict, sets: tuple[str, ...]) -> str:
     out = []
+    pm_sep = r" $\pm$ "
     for label, r in summary["table2"].items():
-        cells = [f"{_pm(r[s]['tts'], sep=' $\\pm$ ')} & {r[s]['mean_queue']['mean']:.2f} & {r[s]['max_queue']['mean']:.2f}"
+        cells = [f"{_pm(r[s]['tts'], sep=pm_sep)} & {r[s]['mean_queue']['mean']:.2f} & {r[s]['max_queue']['mean']:.2f}"
                  for s in sets]
         out.append(f"{label} & " + " & ".join(cells) + f" & {r['sumo_episodes']['mean']:.0f} & {r['compute_h']['mean']:.1f} \\\\")
     return "\n".join(out) + "\n"

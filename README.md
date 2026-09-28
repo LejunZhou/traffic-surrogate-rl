@@ -173,13 +173,13 @@ python scripts/run_rollout.py \
 
 ## Fixed one-hour demand dataset (restored local generator)
 
-The canonical loading → overload → recovery schedule is configured in
-[`configs/experiments/dataset_time_varying.yaml`](configs/experiments/dataset_time_varying.yaml).
-It is separate from the M8 random five-minute profile family and the current M14 study.
+The canonical loading → overload → recovery schedule is defined once in
+[`m14/configs/scenario.yaml`](m14/configs/scenario.yaml), under `demand.profile_segments`.
+Both this generator and the full M14 study use it.
 The generator samples each linear segment at the start of each 30-second interval,
-then holds that rate constant for the interval. Every eleventh sample (indices 0, 11, …)
-uses the exact schedule; other samples independently scale mainline and ramp demand
-by 0.9–1.1. Four ramp-control families rotate across samples.
+then holds that rate constant for the interval. All samples use the exact demand
+schedule; four ramp-control families rotate across samples. Dataset size and
+outputs remain in `configs/experiments/dataset_time_varying.yaml`.
 
 From the project root with the SUMO environment activated:
 
@@ -192,13 +192,17 @@ PYTHONPATH=src python -m sumo_env.dataset_generation --config configs/experiment
 ```
 
 Defaults: 1,000 episodes, a discarded 180-second pre-roll at the initial demands
-and meter setting 0.5, then 120 saved control intervals. Vehicle state and the queue
-carry over from the pre-roll. Outputs go to `data/raw/time_varying/` and 80/10/10
+and meter setting 0.5, then 120 saved control intervals. Vehicles already on the road
+carry over from the pre-roll. The upstream ramp queue and fractional meter
+accumulators reset to zero, and pending ramp insertions are cancelled before
+recording. `recording_initial_ramp_queue` records this zero initial condition;
+`ramp_queue[k]` remains the end-of-interval queue and can be nonzero in interval 0. Outputs go to `data/raw/time_varying/` and 80/10/10
 splits to `data/splits/time_varying/`. Saved arrays include both demand channels,
 commanded control, confirmed ramp inflow, queue, density, and flow; scalar demand
-fields are episode means. The config uses the current `phase1_1.yaml` road and
-vehicle settings; restoring it does not restore the stash's separate scenario,
-surrogate-training, or PPO changes.
+fields are episode means. The config uses `m14/configs/scenario.yaml`: a 60 km/h ramp, 120 km/h
+mainline, 10° merge, 1,200 veh/h meter capacity, and occupancy-based density
+with only the through lane measured at the merge. The same fixed schedule
+is used throughout M14; its native environments use the scenario warmup and reset the ramp queue before recording.
 
 ## Phase 1 scope (as built)
 
@@ -332,3 +336,12 @@ Details: `_plans/milestone_7_plan.md`, `_progress/milestone_7_progress.md`, and 
 - **M6** — Trained PPO directly in SUMO at 20k timesteps (~35 min, M5c reward); the SUMO-trained policy collapsed to u≈0 (sample starvation — only 42 PPO iterations vs M5c's 209) while the M5c surrogate-trained policy transferred to SUMO with only a 13% reward drop and **beat the SUMO-trained policy in SUMO by ~48%** — the headline surrogate-acceleration result. M6b at 100k SUMO timesteps (~3 hours, currently running) is testing whether the corner collapse goes away with more sample budget.
 - **M7** — Replaced the density-ReLU reward term with a direct mainline-**outflow** term, balanced the three terms from a constant-u sweep (`scripts/run_u_sweep_sumo.py` + `scripts/balance_reward_terms.py`), and fixed two SUMO+PPO blockers: a zero-initialised Gaussian on a [0, 1] action box (→ `env.symmetric_action`) and drifting exploration beside the merge's capacity cliff (→ `log_std_init −2` + `EvalCallback` best-checkpoint saving). Result on SUMO 1.27.1 at 2000 + 800 vph: `best_model.zip` return −61 (u ≈ 0.52, 2367 vph served, no breakdown) vs −65 for constant u = 0.5; the nominal best constant u = 0.6 (−43) is a knife edge that ±0.03 action noise tips into gridlock. The scenario itself is fully deterministic (SUMO seed has no effect); with a mild 3 % driver-speed spread (`vehicle.speed_dev`, new knob) the capacity edge drops to u ≈ 0.5, constant u = 0.5 is robust (−66 ± 0.1 over 10 seeds) and the deterministic-trained policy gridlocks in 9/10 seeds — so the next step is training under heterogeneity (`scripts/run_seed_sweep_sumo.py`). A SUMO scenario bug found on the way: after any merge breakdown, SUMO's `departSpeed="max"` left the mainline entry in a self-sustaining slow-insertion state (~76 km/h, ~1550 vph) for the rest of the episode, so every post-jam episode silently ran at reduced demand. Fixed in `configs/sumo/phase1_1.yaml` (`vehicle.depart_speed: desired` + `--extrapolate-departpos`; blocked vehicles wait and are conserved — the backlog drains after the jam at ≈2090 vph and is logged as `pending_mainline`, or set `max_depart_delay_s` to discard and count them instead; the ramp virtual queue is decremented on actual departure) — post-jam insertion is back to 2000 vph and a cleared jam no longer poisons the rest of the episode, verified with `scripts/run_forced_jam_sumo.py`; `scripts/check_demand_range_sumo.py` confirms exact insertion and jam recovery at every mainline demand 1500–2000 vph, with the merge capacity depending on the ramp share (2000 + 480 ok, 1600 + 800 breaks down). **Run 5 (demand-range PPO, 2026-08-29):** trained on mainline 1500–2000 × ramp 400–800 vph with `speed_dev 0.03`; `best_model.zip` (24k steps) learned a demand-conditioned throttle (u 0.36 → 0.23 from 1500 to 2000 vph), grid mean −70 over 18 cells × 3 seeds vs −86 for the best constant, 3/54 breakdowns (`scripts/eval_policy_grid_sumo.py`); the run later degraded from a PPO trust-region blow-up (`approx_kl` 0.11, no `target_kl`). **Run 6** (same setup + `target_kl 0.02`, lr 1e-4, 80k steps) fixed the collapse (best deterministic eval −56 at 57.6k, no late degradation) and is 10–30 return units better in every cell below 1900 vph, but its best checkpoint acts ~0.03 higher at 2000 vph and gridlocks 2000 + 800 in all 3 seeds (grid mean −70.5, 9/54 breakdowns vs run 5's −70.1, 3/54) — single-seed checkpoint selection rewards luck on knife-edge cells. **Run 7** (same training, `--seed 1`, checkpoint every eval pass + post-hoc multi-seed selection, `scripts/select_checkpoint_multiseed.py`) fixed that and produced the current reference policy `best_model_multiseed.zip` (ckpt 72k): grid mean **−60.7**, worst episode −103, 0 catastrophic episodes over 18 cells × 3 seeds — dominating every constant and both earlier runs on mean, tail and worst case. It is real feedback control (u 0.44 → 0.20 with mainline demand, re-opens with queue pressure, and cuts u to recover from transient jams — 11/11 flagged episodes end in free flow; analysis figures in `_progress/figures/`). The ramp meter can now actually drain its queue: `ramp_discharge_vph: 1600` decouples the meter's saturation flow from the 800 vph arrival rate (u is the green fraction of 1600 vph, so u = 0.5 passes the full demand and u = 1 flushes a backlog at +800 vph; earlier constant-u results re-index as u_new = u_old/2, byte-identically), `env.ramp_demand_levels` samples the ramp arrival rate per episode, and `training.action_init_u` starts PPO at a chosen metering rate instead of SB3's accidental u = 0.5. SUMO tests before training (`_progress/milestone_7_progress.md` §7.10): at 2000 vph mainline the merge margin (~480 vph) is below the 800 vph arrivals, so the queue can only be drained when arrivals drop (400 vph → drained) or mainline demand is lower (1500 → an 800 vph release clears a 65-vehicle queue in 10 min). Ahead of a demand-range run the ramp arrival rate was added to the observation (`env.observe_ramp_demand`, 22 → 23 features) and the reward re-balanced over a 3 × 3 demand grid (99 constant-u episodes; δ 3.57 / β 1 / γ 0.063, `scripts/balance_reward_terms.py` is grid-aware). Deterministic no-jam episodes are unchanged in substance (returns move by ≤ 2), but the fixed scenario is harsher under driver heterogeneity — the old `"max"` insertion had been smoothing platoons — so at `speed_dev 0.03` the robust constant is now u = 0.45 (−81, 0/10 breakdowns; u = 0.5 breaks down in 3/10 seeds). Details: `_progress/milestone_7_progress.md`.
 - **Classical baselines (ALINEA / PI-ALINEA, 2026-08-31)** — Added the standard local ramp-metering feedback controllers as tuned baselines (`src/rl/baseline_controllers.py`; spec strings like `alinea:ki=15,rho=37,det=12` work anywhere a policy path does, e.g. `scripts/eval_policy_grid_sumo.py`). ALINEA is an integral regulator on the density at a merge-area detector with anti-windup and an optional queue-override lower bound; PI-ALINEA adds a proportional (damping) term. Tuning over detector × set-point × gain (288 episodes) found: the detector must sit at the **merge nose (1300 m)** — detectors ≥ 1400 m are downstream of the bottleneck, stay free-flowing during a jam, and drive the controller into gridlock at u ≈ 1; low gain (K_I 15) and a set-point ~25 % above the free-flow merge density (37 veh/km) win; the PI term is a tie (no distant downstream bottleneck in this geometry). Final benchmark, 18 cells × 3 seeds: run 7 @ 72k **−60.7** (published seeds 0/1/2) / **−61.3** (held-out 100/101/102) vs ALINEA −62.7 / −63.5, PI-ALINEA −62.8 / −62.8, u = 0.25 −85.6 / −84.6 — all feedback policies share the same worst case (the 1500+400 pass-through floor) with 0 catastrophic episodes. The learned policy's ~2-point margin comes from pre-emptive metering on the high-ramp cells (−13…−20 at 1500–1700 + 800 vph, 11 vs ~27 transient jams) using its queue/demand observations; ALINEA wins the 1900/2000 + 400 cells. Details: `_progress/alinea_baseline_progress.md`.
+
+The scenario specifies a 180-second simulation warmup at the initial demand
+and meter setting `u=0.5`, followed by the full 3600-second recorded schedule.
+At recording start, the upstream ramp queue, pending ramp insertions, and meter
+accumulators are cleared; admitted vehicles remain on the road. Warmup samples
+are excluded from recorded trajectories and metrics. The existing 90-second
+reward mask remains separate. Rollouts save initial density and vehicle inventory.
+Surrogate resets use the training-set mean initial state, saved in checkpoints;
+data and checkpoints from a different warmup protocol must be regenerated.

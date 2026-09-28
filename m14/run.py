@@ -454,8 +454,12 @@ def smoke(args) -> None:
     modify("env_sumo.yaml", lambda obj: obj["training"].update(eval_freq=120))
     for name in ("val", "test", "ood"):
         p = scratch / f"configs/profiles/{name}.json"
-        obj = json.loads(p.read_text()); obj["profiles"] = obj["profiles"][:1]; obj["n"] = 1
-        obj["profiles"][0]["sumo_seeds"] = [100]
+        obj = json.loads(p.read_text()); obj["n"] = 1
+        if "scenario" in obj:
+            obj.update(seeds_per_profile=1, seed_base=100)
+        else:
+            obj["profiles"] = obj["profiles"][:1]
+            obj["profiles"][0]["sumo_seeds"] = [100]
         p.write_text(json.dumps(obj, indent=2))
     def run(*cmd): execute(list(cmd), root=scratch)
     run("scripts/generate_round0_dataset.py", "--workers", args.workers, "--study", "smoke_data")

@@ -69,15 +69,24 @@ class SurrogateVecEnv(VecEnv):
         # Meter discharge D and the storage cap follow SumoEnv's rule: the env key
         # wins, else the scenario file's demand block (M14: v3b has D = 1200),
         # else the M14 defaults (1200, unlimited).
-        _demand = {}; _dets = {}
+        _demand = {}; _dets = {}; _sim = {}
         if cfg.get("sumo_config"):
             try:
                 from utils.config import load_config as _load_cfg
                 _sc = cfg["sumo_config"]; _scp = Path(_sc) if Path(_sc).is_absolute() else self.project_root / _sc
                 _scfg = _load_cfg(str(_scp))
-                _demand = dict(_scfg.get("demand", {})); _dets = dict(_scfg.get("detectors", {}))
+                _demand = dict(_scfg.get("demand", {})); _dets = dict(_scfg.get("detectors", {})); _sim = dict(_scfg.get("simulation", {}))
             except Exception:
-                _demand = {}; _dets = {}
+                _demand = {}; _dets = {}; _sim = {}
+        self.simulation_warmup_s = float(_sim.get("warmup_s", 0.0))
+        initial = self.norm.initial_state
+        if (float(initial.get("warmup_s", 0.0)) != self.simulation_warmup_s
+                or float(initial.get("warmup_ramp_control", 0.5)) != float(_sim.get("warmup_ramp_control", 0.5))):
+            raise ValueError("Surrogate checkpoint warmup does not match scenario; retrain with warmed trajectories")
+        self.initial_density = np.asarray(initial.get("density", np.zeros(self.N_x)), dtype=np.float32)
+        self.initial_inventory = float(initial.get("inventory", 0.0))
+        if self.initial_density.shape != (self.N_x,) or not np.isfinite(self.initial_density).all():
+            raise ValueError("Checkpoint initial density must match the detector grid")
         # breakdown threshold of the episode metrics (parity with SumoEnv, M15)
         self.breakdown_density_veh_km = float(cfg.get("breakdown_density_veh_km", _dets.get("breakdown_density_veh_km", 60.0)))
         self.ramp_discharge_vph = float(cfg.get("ramp_discharge_vph", _demand.get("ramp_discharge_vph", 1200.0)))
@@ -305,8 +314,8 @@ class SurrogateVecEnv(VecEnv):
         self.k[i] = 0
         self.queue[i] = 0.0
         self.member[i] = int(self.member_rng.integers(0, self.M)) if self.mode == "sample" else 0
-        self.density[i] = 0.0
-        self.cum_offered[i] = 0.0
+        self.density[i] = self.initial_density
+        self.cum_offered[i] = self.initial_inventory
         self.cum_served[i] = 0.0
         self.ep_return[i] = 0.0
         self.queue_samples[i] = []

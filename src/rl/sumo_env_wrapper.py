@@ -57,49 +57,10 @@ except ImportError as exc:
 
 from rl.reward import RewardWeights, backlog_estimate, offered_q_ref, reward_terms as compute_reward_terms
 from sumo_env.demand_profiles import DemandProfile, resolve_profile_source
-from sumo_env.detectors import build_detector_file, get_detector_ids_per_lane, get_x_grid
+from sumo_env.detectors import build_detector_file, get_detector_ids_per_lane, get_x_grid, density_from_loops
 from sumo_env.network_builder import build_network, _write_routes
 from sumo_env.ramp_queue import queue_override_rate
 from utils.config import load_config, merge_configs
-
-
-def density_from_loops(
-    sum_count: np.ndarray, sum_speed: np.ndarray, speed_count: np.ndarray,
-    sum_occ_per_lane: list[np.ndarray], n_substeps: int, step_len: float,
-    method: str, vehicle_length_m: float, effective_length_m: float, jam_density: float,
-    merge_station_lanes: str = "mean",
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Aggregate one control interval of E1 readings into (density, speed, flow).
-
-    sum_count / sum_speed / speed_count are summed over lanes and sub-steps;
-    sum_occ_per_lane[j] holds the per-lane occupancy sums (%) at position j.
-    merge_station_lanes (occupancy method, stations with more than one loop, i.e.
-    the merge station on the acceleration edge where lane 0 is the ramp lane):
-      "mean"      lane-averaged density (v2/v3 stores)
-      "mainline"  density of the through lane(s) only, lane 0 dropped (v3b)
-    """
-    if merge_station_lanes not in ("mean", "mainline"):
-        raise ValueError(f"unknown merge_station_lanes {merge_station_lanes!r} (expected 'mean' or 'mainline')")
-    flow_vph = sum_count / (n_substeps * step_len) * 3600.0
-    mean_speed_mps = np.where(speed_count > 0, sum_speed / np.maximum(speed_count, 1), 0.0)
-    mean_speed_kmph = mean_speed_mps * 3.6
-    if method == "occupancy":
-        dens = np.zeros(len(sum_occ_per_lane), dtype=np.float64)
-        for j, occ_lanes in enumerate(sum_occ_per_lane):
-            occ_frac = np.asarray(occ_lanes, dtype=np.float64) / (n_substeps * 100.0)
-            per_lane = np.minimum(occ_frac * (1000.0 / effective_length_m), jam_density)
-            if merge_station_lanes == "mainline" and per_lane.shape[0] > 1:
-                per_lane = per_lane[1:]          # lane 0 is the ramp / acceleration lane
-            dens[j] = float(np.mean(per_lane))
-        density = dens
-    elif method == "qv":
-        sum_occ = np.asarray([float(np.sum(o)) for o in sum_occ_per_lane], dtype=np.float64)
-        mean_occ_frac = sum_occ / (n_substeps * 100.0)
-        density_occ = mean_occ_frac * (1000.0 / vehicle_length_m)
-        density = np.where(mean_speed_kmph > 5.0, flow_vph / np.maximum(mean_speed_kmph, 1e-6), density_occ)
-    else:
-        raise ValueError(f"unknown density_method {method!r} (expected 'qv' or 'occupancy')")
-    return density.astype(np.float32), mean_speed_kmph.astype(np.float32), flow_vph.astype(np.float32)
 
 
 class SumoEnv(gym.Env):

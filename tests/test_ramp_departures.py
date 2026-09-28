@@ -31,7 +31,8 @@ class DelayedTraCI:
         self.closed = False
         self.simulation = self
         self.exceptions = runner.traci.exceptions
-        self.vehicle = SimpleNamespace(add=self.add)
+        self.vehicle = SimpleNamespace(add=self.add, remove=self.remove)
+        self.lane = SimpleNamespace(getLength=lambda _: 180.0)
         self.edge = SimpleNamespace(getLastStepVehicleNumber=lambda _: 0)
         self.inductionloop = SimpleNamespace(
             getLastStepVehicleNumber=lambda _: 0,
@@ -52,6 +53,9 @@ class DelayedTraCI:
         assert vehID not in self.accepted
         self.accepted.append(vehID)
         self.pending.add(vehID)
+
+    def remove(self, veh_id):
+        self.pending.remove(veh_id)
 
     def simulationStep(self):
         self.time += 1
@@ -250,3 +254,37 @@ def test_fixed_dataset_append_preserves_profiles_and_controls(monkeypatch, confi
         for key in ('mainline_demand', 'ramp_demand', 'ramp_control_cmd', 'seed'):
             np.testing.assert_array_equal(actual[key], expected[key])
         assert actual['warmup_s'] == 4
+
+
+@pytest.mark.parametrize("warmup_control", [0.0, 1.0])
+def test_recording_starts_with_zero_queue_and_no_warmup_requests(monkeypatch, config, warmup_control):
+    config["simulation"].update(duration_s=8, warmup_s=7, warmup_ramp_control=warmup_control)
+    config["demand"]["ramp_demand_vph"] = 1000
+    # One warmup arrival plus a fractional remainder; a pending
+    # request would depart at second 8 unless explicitly cancelled.
+    fake = DelayedTraCI({"ramp_0": 8})
+    monkeypatch.setattr(runner, "traci", fake)
+    data = runner.run_simulation("net", "routes", "detectors", np.zeros(2), config)
+    assert data["metadata"]["warmup_virtual_queue_final"] == 1
+    assert data["metadata"]["recording_initial_ramp_queue"] == 0
+    assert data["metadata"]["warmup_ramp_pending_final"] == int(warmup_control)
+    np.testing.assert_array_equal(data["ramp_departed_count"], [0, 0])
+    np.testing.assert_array_equal(data["ramp_pending_count"], [0, 0])
+    np.testing.assert_array_equal(data["ramp_queue"], [1, 2])
+    assert not fake.pending
+
+
+def test_fixed_generator_uses_m14_occupancy_and_through_lane(monkeypatch):
+    dataset = yaml.safe_load((ROOT / 'configs/experiments/dataset_time_varying.yaml').read_text())
+    scenario = yaml.safe_load((ROOT / dataset['base_sumo_config']).read_text())
+    assert scenario['network']['ramp_speed_limit_mps'] == 16.67
+    assert scenario['demand']['ramp_discharge_vph'] == 1200
+    scenario['simulation'].update(duration_s=4, dt_ctrl_s=4)
+    scenario['demand']['profile_segments'] = [{'start_min': 0, 'end_min': 4/60, 'mainline_vph': 1250, 'ramp_vph': 250}]
+    fake = DelayedTraCI({})
+    fake.inductionloop.getLastStepOccupancy = lambda detector: 20.0 if detector == 'det_12_L1' else 100.0
+    monkeypatch.setattr(runner, 'traci', fake)
+    data = runner.run_simulation('net', 'routes', 'detectors', np.zeros(1), scenario)
+    assert data['density'][12, 0] == pytest.approx(40.0)  # exclude acceleration lane
+    assert data['density'][0, 0] == pytest.approx(142.857)  # clip at jam density
+    assert data['metadata']['ramp_discharge_vph'] == 1200

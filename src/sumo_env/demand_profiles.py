@@ -451,8 +451,16 @@ def demand_array(value, steps: int, name: str) -> np.ndarray:
 def scenario_demands(config: dict) -> tuple[np.ndarray, np.ndarray]:
     sim, demand = config["simulation"], config["demand"]
     steps = int(sim["duration_s"] / sim["dt_ctrl_s"])
-    return tuple(demand_array(demand.get(f"{name}_demand_profile", demand[f"{name}_demand_vph"]),
-                              steps, name) for name in ("mainline", "ramp"))
+    result = []
+    for name in ("mainline", "ramp"):
+        if f"{name}_demand_profile" in demand:
+            values = demand_array(demand[f"{name}_demand_profile"], steps, name)
+        elif demand.get("profile_segments"):
+            values = _segmented_profile(demand["profile_segments"], name, steps, float(sim["dt_ctrl_s"]))
+        else:
+            values = demand_array(demand[f"{name}_demand_vph"], steps, name)
+        result.append(values)
+    return tuple(result)
 
 
 def sample_demand_profile(spec: dict, steps: int, rng: np.random.Generator) -> np.ndarray:
